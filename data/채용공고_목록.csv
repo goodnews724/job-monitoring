@@ -1,0 +1,24 @@
+회사명,채용공고 URL,selenium_required,selector
+네이버웹툰,https://recruit.webtoonscorp.com/rcrt/list.do,False,li.card_item h4.card_title
+롯데,https://recruit.lotte.co.kr/apply/announcement,False,li div.job-card-group
+딥다이브,https://deep-dive.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
+리디,https://ridi.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
+블렌디드,https://blended.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
+부스트랩,https://boostlab.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
+비나우,https://www.benow.co.kr/ko/career1,False,a div.sc-9b56f69e-0.jlntFl
+스푼랩스,https://career.spoonlabs.com/ko/recruiting,False,a div.sc-9b56f69e-0.jlntFl
+아모레퍼시픽,https://careers.apgroup.com/search/,False,div.col-md-12.hidden-sm.hidden-xs.sub-section.sub-section-desktop div.tiletitle
+이그니스,https://career.egnis.kr/ko/apply,False,a div.sc-9b56f69e-0.jlntFl
+이노션에스,https://innocean-s.com/careers,False,li.recruit_board_item div.info
+크레이버,https://craver-corp.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
+크리에이트립,https://creatrip.career.greetinghr.com/ko/home,False,a div.sc-9b56f69e-0.jlntFl
+펄어비스,https://www.pearlabyss.com/ko-KR/Company/Careers/List?_jobGroupCode=0&_workersType=&_workExperienceType=&_corporationCode=&_pageNo=1&_tagNo=&_searchText=,False,a.career_list_item div.list_category.cell_title
+한화,https://www.hanwhain.com/web/apply/notification/list.do,False,li strong.subsidiary
+더파운더즈, https://thefounders.careers/recruit,True,div.JobPostingsJobPosting__Layout-sc-6ae888f2-0.ffnSOB div.JobPostingsJobPosting__Bottom-sc-6ae888f2-5.iXrIoX
+오스템임플란트, https://osstem.recruiter.co.kr/app/jobnotice/list,True,li h2.list-bbs-title
+토스(비바리퍼블리카),https://toss.im/career/jobs,True,a.css-g65o95 div.css-16fusbk
+카카오스타일,https://career.kakaostyle.com/jobs,True,div.JobPostingsJobPosting__Layout-sc-6ae888f2-0.ffnSOB div.JobPostingsJobPosting__Bottom-sc-6ae888f2-5.iXrIoX
+컴투스,https://com2us.recruiter.co.kr/career/career,True,li.RecruitKanban_recruit-item-wrapper__bL5bB div.RecruitKanban_item-header__LewDn
+스노우,https://recruit.snowcorp.com/rcrt/list.do,True,li.card_item h4.card_title
+와이어트,https://wyatt.ninehire.site/recruit,True,div.JobPostingsJobPosting__Layout-sc-6ae888f2-0.ffnSOB div.JobPostingsJobPosting__Bottom-sc-6ae888f2-5.iXrIoX
+마이다스아이티,https://midas.recruiter.co.kr/career/home,True,li p.RecruitList_title__OqWa3
