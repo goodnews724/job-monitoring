@@ -1,4 +1,4 @@
-회사명,채용공고 URL,selenium_required,selector
+﻿회사명,채용공고 URL,selenium_required,selector
 네이버웹툰,https://recruit.webtoonscorp.com/rcrt/list.do,False,li.card_item h4.card_title
 롯데,https://recruit.lotte.co.kr/apply/announcement,False,li div.job-card-group
 딥다이브,https://deep-dive.career.greetinghr.com/ko/recruit,False,a div.sc-9b56f69e-0.jlntFl
