@@ -9,7 +9,7 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 import logging
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 from dotenv import load_dotenv
 
 # .env 파일 로드
@@ -24,6 +24,9 @@ class JobMonitor:
         
         # .env에서 웹훅 URL 로드
         self.webhook_url = os.getenv('SLACK_WEBHOOK_URL')
+        
+        # 회사별 URL 저장 (링크용)
+        self.company_urls = {}
         
         # 로깅 설정
         logging.basicConfig(
@@ -65,24 +68,24 @@ class JobMonitor:
             self.logger.error(f"HTML 가져오기 실패: {e}")
             return None
 
-    def extract_current_jobs(self) -> Dict[str, Set[str]]:
-        """현재 채용공고를 추출하여 회사별로 정리"""
+    def extract_current_jobs(self) -> Tuple[Dict[str, Set[str]], List[Dict]]:
+        """현재 채용공고를 추출하여 회사별로 정리, 실패한 회사 목록도 반환"""
         if not os.path.exists(self.config_path):
             self.logger.error(f"설정 파일 '{self.config_path}'을 찾을 수 없습니다.")
-            return {}
+            return {}, []
 
         try:
             df_config = pd.read_csv(self.config_path)
         except Exception as e:
             self.logger.error(f"설정 파일 처리 중 오류: {e}")
-            return {}
+            return {}, []
 
         # 선택자가 설정된 회사만 처리
         df_config = df_config[df_config['selector'].notna() & (df_config['selector'].str.strip() != '')]
         
         if df_config.empty:
             self.logger.warning("선택자가 설정된 회사가 없습니다.")
-            return {}
+            return {}, []
 
         selenium_needed = df_config['selenium_required'].any()
         driver = None
@@ -92,6 +95,8 @@ class JobMonitor:
             driver = self.create_minimal_driver()
 
         current_jobs = {}
+        failed_companies = []
+        self.company_urls = {}  # URL 저장 초기화
         
         self.logger.info("채용 공고 추출 시작...")
         start_time = time.time()
@@ -103,10 +108,18 @@ class JobMonitor:
                 use_selenium = row['selenium_required']
                 selector = row['selector']
                 
+                # 회사별 URL 저장 (슬랙 링크용)
+                self.company_urls[company_name] = url
+                
                 self.logger.info(f"[{index+1}/{len(df_config)}] {company_name} 처리 중...")
                 
                 html_content = self.get_html_content(url, use_selenium, driver)
                 if not html_content:
+                    failed_companies.append({
+                        'company': company_name,
+                        'reason': 'HTML 내용 가져오기 실패',
+                        'url': url
+                    })
                     continue
                     
                 try:
@@ -115,6 +128,11 @@ class JobMonitor:
                     
                     if not postings:
                         self.logger.warning(f"    '{selector}' 선택자로 공고를 찾지 못함")
+                        failed_companies.append({
+                            'company': company_name,
+                            'reason': f"선택자 '{selector}'로 공고를 찾지 못함",
+                            'url': url
+                        })
                         continue
 
                     job_titles = set()
@@ -126,9 +144,20 @@ class JobMonitor:
                     if job_titles:
                         current_jobs[company_name] = job_titles
                         self.logger.info(f"    성공: {len(job_titles)}개 공고 추출됨")
+                    else:
+                        failed_companies.append({
+                            'company': company_name,
+                            'reason': '유효한 공고를 찾지 못함',
+                            'url': url
+                        })
                     
                 except Exception as e:
                     self.logger.error(f"    HTML 파싱 실패: {e}")
+                    failed_companies.append({
+                        'company': company_name,
+                        'reason': f'HTML 파싱 실패: {str(e)}',
+                        'url': url
+                    })
                     continue
                     
         finally:
@@ -139,7 +168,10 @@ class JobMonitor:
         total_jobs = sum(len(jobs) for jobs in current_jobs.values())
         self.logger.info(f"총 {total_jobs}개 공고 수집 완료 (실행시간: {elapsed_time:.1f}초)")
         
-        return current_jobs
+        if failed_companies:
+            self.logger.warning(f"⚠️  {len(failed_companies)}개 회사에서 크롤링 실패")
+        
+        return current_jobs, failed_companies
 
     def load_existing_jobs(self) -> Dict[str, Set[str]]:
         """기존에 저장된 채용공고 로드"""
@@ -160,6 +192,35 @@ class JobMonitor:
         except Exception as e:
             self.logger.error(f"기존 공고 로드 오류: {e}")
             return {}
+
+    def check_suspicious_results(self, current_jobs: Dict[str, Set[str]], 
+                               existing_jobs: Dict[str, Set[str]], 
+                               new_jobs: Dict[str, List[str]]) -> List[str]:
+        """의심스러운 결과 체크하여 경고 메시지 생성"""
+        warnings = []
+        
+        # 1. 모든 공고가 새로운 공고인 경우 체크
+        for company, new_job_list in new_jobs.items():
+            current_count = len(current_jobs.get(company, set()))
+            existing_count = len(existing_jobs.get(company, set()))
+            new_count = len(new_job_list)
+            
+            # 기존 공고가 있었는데 현재 공고의 90% 이상이 새로운 공고인 경우
+            if existing_count > 0 and current_count > 0:
+                new_ratio = new_count / current_count
+                if new_ratio >= 0.9:  # 90% 이상이 새로운 공고
+                    warnings.append(
+                        f"{company}: 공고의 {new_ratio:.0%}가 새로운 공고입니다"
+                    )
+        
+        # 2. 기존에 있던 회사가 갑자기 공고가 없어진 경우
+        missing_companies = set(existing_jobs.keys()) - set(current_jobs.keys())
+        if missing_companies:
+            warnings.append(
+                f"다음 회사들의 공고를 찾을 수 없습니다: {', '.join(missing_companies)}"
+            )
+        
+        return warnings
 
     def find_new_jobs(self, current_jobs: Dict[str, Set[str]], existing_jobs: Dict[str, Set[str]]) -> Dict[str, List[str]]:
         """새로운 채용공고 찾기"""
@@ -199,37 +260,90 @@ class JobMonitor:
         except Exception as e:
             self.logger.error(f"파일 저장 오류: {e}")
 
-    def send_slack_notification(self, new_jobs: Dict[str, List[str]]):
-        """슬랙으로 알림 전송"""
-        if not new_jobs:
-            self.logger.info("전송할 새로운 공고가 없습니다.")
-            return
-
+    def send_slack_notification(self, new_jobs: Dict[str, List[str]], 
+                            warnings: List[str] = None, 
+                            failed_companies: List[Dict] = None):
+        """간결한 슬랙 알림 전송 - 사용자 친화적"""
+        
         if not self.webhook_url:
             self.logger.error("❌ 슬랙 웹훅 URL이 .env 파일에 설정되지 않았습니다.")
             self.logger.error("   .env 파일에 SLACK_WEBHOOK_URL=your_webhook_url 을 추가하세요.")
             return
 
-        # 메시지 포맷팅
+        # 알림이 필요한 경우만 메시지 전송
+        has_new_jobs = bool(new_jobs)
+        has_warnings = bool(warnings)
+        has_failures = bool(failed_companies)
+        
+        # 아무 이슈도 없으면 메시지 전송하지 않음
+        if not has_new_jobs and not has_warnings and not has_failures:
+            self.logger.info("새로운 공고나 문제사항이 없어 슬랙 알림을 보내지 않습니다.")
+            return
+
         current_time = datetime.now().strftime('%H:%M')
-        message_parts = [f"🚀 *새로운 채용공고 알림* ({current_time})\n"]
+        message_parts = []
         
-        total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
-        message_parts.append(f"📊 총 {total_new_jobs}개의 새로운 공고가 발견되었습니다!\n")
+        # 🎉 새로운 공고가 있는 경우
+        if has_new_jobs:
+            total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
+            message_parts.append(f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!* ({current_time})")
+            message_parts.append("")
+            
+            for company_name, jobs in new_jobs.items():
+                company_url = self.company_urls.get(company_name, "")
+                if company_url:
+                    linked_company_name = f"<{company_url}|{company_name}>"
+                else:
+                    linked_company_name = company_name
+                
+                message_parts.append(f"📢 *{linked_company_name}* - {len(jobs)}개")
+                
+                # 모든 공고 표시
+                for job_title in jobs:
+                    escaped_title = job_title.replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
+                    message_parts.append(f"• {escaped_title}")
+                
+                message_parts.append("")  # 회사별 구분을 위한 빈 줄
         
-        for company_name, jobs in new_jobs.items():
-            message_parts.append(f"\n📢 *{company_name}*")
-            for job_title in jobs:
-                # 슬랙 특수문자 이스케이프
-                escaped_title = job_title.replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
-                message_parts.append(f"• {escaped_title}")
+        # ⚠️ 문제가 있는 경우만 간단히 알림
+        if has_warnings or has_failures:
+            if not has_new_jobs:
+                message_parts.append(f"⚠️ *채용공고 확인 필요* ({current_time})")
+                message_parts.append("")
+            
+            # 간단한 경고 메시지
+            if has_warnings:
+                suspicious_companies = []
+                for warning in warnings:
+                    if ":" in warning:
+                        company_part = warning.split(":")[0]
+                        suspicious_companies.append(company_part)
+                
+                if suspicious_companies:
+                    message_parts.append("⚠️ 일부 회사에서 많은 공고가 새로 표시되었습니다.")
+                    message_parts.append(f"확인 필요: {', '.join(suspicious_companies)}")
+                    message_parts.append("")
+            
+            # 실패한 회사들 간단히 표시
+            if has_failures:
+                failed_company_names = [fail_info['company'] for fail_info in failed_companies]
+                message_parts.append(f"❌ {len(failed_company_names)}개 회사에서 공고를 가져올 수 없습니다:")
+                message_parts.append(f"{', '.join(failed_company_names)}")
+                message_parts.append("")
+                message_parts.append("💡 해당 회사 사이트를 직접 확인해보세요.")
         
-        message = "\n".join(message_parts)
+        message = "\n".join(message_parts).strip()
+        
+        # 아이콘 선택
+        if has_warnings or has_failures:
+            icon = ":warning:"
+        else:
+            icon = ":tada:"
         
         payload = {
             "text": message,
-            "username": "채용공고 봇",
-            "icon_emoji": ":briefcase:"
+            "username": "채용공고 알림",
+            "icon_emoji": icon
         }
         
         try:
@@ -256,24 +370,34 @@ class JobMonitor:
             self.logger.info("기존 공고 없음 (첫 실행)")
         
         # 2단계: 현재 공고 추출
-        current_jobs = self.extract_current_jobs()
-        if not current_jobs:
-            self.logger.error("채용공고 추출 실패")
-            return False
+        current_jobs, failed_companies = self.extract_current_jobs()
         
         # 3단계: 새로운 공고 찾기
         new_jobs = self.find_new_jobs(current_jobs, existing_jobs)
         
-        # 4단계: 새로운 공고가 있으면 알림 전송
+        # 4단계: 의심스러운 결과 체크
+        warnings = self.check_suspicious_results(current_jobs, existing_jobs, new_jobs)
+        
+        # 5단계: 필요한 경우만 슬랙 알림 전송
         if new_jobs:
             total_new = sum(len(jobs) for jobs in new_jobs.values())
             self.logger.info(f"🎉 총 {total_new}개의 새로운 공고 발견!")
-            self.send_slack_notification(new_jobs)
-        else:
-            self.logger.info("새로운 공고가 없습니다.")
         
-        # 5단계: 현재 공고로 업데이트
-        self.save_jobs(current_jobs)
+        if warnings:
+            self.logger.warning("⚠️ 의심스러운 결과 감지")
+        
+        if failed_companies:
+            self.logger.error(f"❌ {len(failed_companies)}개 회사에서 크롤링 실패")
+        
+        # 알림이 필요한 경우에만 전송
+        self.send_slack_notification(new_jobs, warnings, failed_companies)
+        
+        if not new_jobs and not warnings and not failed_companies:
+            self.logger.info("새로운 공고 및 이상사항이 없습니다. (슬랙 알림 없음)")
+        
+        # 6단계: 현재 공고로 업데이트
+        if current_jobs:
+            self.save_jobs(current_jobs)
         
         self.logger.info("=" * 60)
         self.logger.info("채용공고 모니터링 완료")
