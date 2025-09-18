@@ -49,7 +49,10 @@ def save_html_from_csv(csv_path, html_dir):
             try:
                 if not use_selenium:
                     print(f"[{index+1}] '{company_name}' - requests")
-                    response = requests.get(url, timeout=8)
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                    response = requests.get(url, headers=headers, timeout=8)
                     html_content = response.text
                 else:
                     print(f"[{index+1}] '{company_name}' - selenium")

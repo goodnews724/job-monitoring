@@ -7,3 +7,5 @@ webdriver-manager
 python-dotenv
 lxml
 html5lib
+gspread
+google-auth-oauthlib
