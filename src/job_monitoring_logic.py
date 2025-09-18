@@ -23,7 +23,12 @@ class JobMonitoringDAG:
         self.base_dir = base_dir
         self.data_dir = os.path.join(base_dir, 'data')
         self.html_dir = os.path.join(base_dir, 'html')
-        os.makedirs(self.html_dir, exist_ok=True)
+        # HTML 디렉토리 생성 (더 안전한 방식)
+        try:
+            os.makedirs(self.html_dir, exist_ok=True)
+        except (FileExistsError, OSError):
+            # 이미 존재하거나 권한 문제가 있어도 계속 진행
+            pass
         self.worksheet_name = worksheet_name
         self.webhook_url_env = webhook_url_env  # 환경변수 이름 저장
         self.results_path = os.path.join(self.data_dir, results_filename)
@@ -480,7 +485,7 @@ class JobMonitoringDAG:
         if not os.path.exists(self.results_path):
             return {}
         try:
-            df = pd.read_csv(self.results_path)
+            df = pd.read_csv(self.results_path, encoding='utf-8-sig')
             return {comp: set(df_comp['job_posting_title']) for comp, df_comp in df.groupby('회사_한글_이름')}
         except Exception as e:
             self.logger.error(f"기존 공고 로드 오류: {e}")
@@ -564,8 +569,18 @@ class JobMonitoringDAG:
         for i, message in enumerate(messages_to_send):
             payload = {"text": message, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
             try:
-                requests.post(self.webhook_url, json=payload, timeout=10)
-                self.logger.info(f"✅ 슬랙 알림 전송 완료 ({i+1}/{len(messages_to_send)})")
+                self.logger.info(f"📤 슬랙 메시지 전송 시도 ({i+1}/{len(messages_to_send)}) - 메시지 길이: {len(message)}자")
+                response = requests.post(self.webhook_url, json=payload, timeout=15)
+
+                if response.status_code == 200:
+                    self.logger.info(f"✅ 슬랙 알림 전송 완료 ({i+1}/{len(messages_to_send)})")
+                else:
+                    self.logger.error(f"❌ 슬랙 응답 오류 ({i+1}/{len(messages_to_send)}): {response.status_code} - {response.text}")
+
+                # 슬랙 레이트 리밋 방지를 위한 짧은 대기
+                import time
+                time.sleep(1)
+
             except Exception as e:
                 self.logger.error(f"❌ 슬랙 알림 전송 오류 ({i+1}/{len(messages_to_send)}): {e}")
 
