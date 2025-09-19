@@ -9,6 +9,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
+import pytz
 import logging
 from typing import Dict, List, Set, Tuple, Optional
 from dotenv import load_dotenv
@@ -503,7 +504,9 @@ class JobMonitoringDAG:
         return warnings
 
     def save_jobs(self, current_jobs: Dict):
-        all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': datetime.now().strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
+        kst = pytz.timezone('Asia/Seoul')
+        current_time_kst = datetime.now(kst)
+        all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
         pd.DataFrame(all_postings).to_csv(self.results_path, index=False, encoding='utf-8-sig')
         self.logger.info(f"결과를 '{self.results_path}'에 저장했습니다.")
 
@@ -516,7 +519,8 @@ class JobMonitoringDAG:
             self.logger.info("알림 보낼 내용이 없습니다.")
             return
 
-        current_time = datetime.now().strftime('%H:%M')
+        kst = pytz.timezone('Asia/Seoul')
+        current_time = datetime.now(kst).strftime('%H:%M')
         messages_to_send = []
 
         # 1. 새로운 채용공고 메시지들 생성
