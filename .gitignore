@@ -144,6 +144,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Google API credentials
+key/credentials.json
+
 # Spyder project settings
 .spyderproject
 .spyproject
