@@ -11,6 +11,7 @@ x-airflow-common: &airflow-common
     - AIRFLOW_GID=0
     - GOOGLE_SHEET_KEY=${GOOGLE_SHEET_KEY}
     - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+    - TOP5000COMPANY_URL=${TOP5000COMPANY_URL}
   volumes:
     - ./src:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
