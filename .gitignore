@@ -208,3 +208,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Ignore contents of data and key directories
+/data/*
+/key/*
+!/data/.gitkeep
+!/key/.gitkeep

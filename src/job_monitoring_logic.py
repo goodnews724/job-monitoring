@@ -61,34 +61,116 @@ class JobMonitoringDAG:
 
         original_df_config = df_config.copy()
 
-        df_config = self.preprocess_companies(df_config)
-        df_config = self.stabilize_selectors(df_config)
+        # 5000대_기업 시트인 경우 처리용으로만 상위 100개 사용
+        df_for_processing = df_config.copy()
+        if "5000대" in self.worksheet_name:
+            original_size = len(df_for_processing)
+            df_for_processing = df_for_processing.head(100)
+            self.logger.info(f"📊 5000대_기업 시트 - 상위 100개 회사만 처리 (전체: {original_size}개, 시트는 전체 유지)")
 
-        if not df_config.equals(original_df_config):
-            self.logger.info("Google Sheets에 변경 사항 업데이트 중...")
-            self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+        df_processed = self.preprocess_companies(df_for_processing)
+        df_processed = self.stabilize_selectors(df_processed)
+
+        # 처리 결과를 원본 DataFrame에 반영 (100개 제한된 범위 내에서만)
+        if "5000대" in self.worksheet_name:
+            # 처리된 100개의 결과를 원본 DataFrame의 해당 위치에 반영
+            updated_count = 0
+            for idx in df_processed.index:
+                if idx in df_config.index:
+                    # selenium_required 값이 업데이트되었는지 확인
+                    if pd.isna(original_df_config.loc[idx, 'selenium_required']) or original_df_config.loc[idx, 'selenium_required'] == '':
+                        if df_processed.loc[idx, 'selenium_required'] in [0, 1, -1]:
+                            updated_count += 1
+                    df_config.loc[idx] = df_processed.loc[idx]
+
+            if updated_count > 0:
+                self.logger.info(f"📝 {updated_count}개 회사의 selenium_required 값이 업데이트되었습니다.")
+        else:
+            df_config = df_processed
+
+        # 변경사항 체크를 더 세밀하게 수행
+        has_changes = False
+        if "5000대" in self.worksheet_name:
+            # selenium_required 컬럼 변경사항만 체크
+            selenium_changes = 0
+            for idx in df_processed.index:
+                if idx in original_df_config.index:
+                    old_val = original_df_config.loc[idx, 'selenium_required']
+                    new_val = df_config.loc[idx, 'selenium_required']
+
+                    # 값 정규화: 빈 문자열과 NaN을 None으로 처리하고, 숫자는 int로 변환
+                    def normalize_selenium_value(val):
+                        if pd.isna(val) or val == '' or val == 'nan':
+                            return None
+                        try:
+                            return int(float(val))
+                        except (ValueError, TypeError):
+                            return None
+
+                    old_normalized = normalize_selenium_value(old_val)
+                    new_normalized = normalize_selenium_value(new_val)
+
+                    # 디버그 로그 추가
+                    company_name = df_config.loc[idx, '회사_한글_이름']
+                    self.logger.info(f"🔍 {company_name}: old={old_val}({old_normalized}) -> new={new_val}({new_normalized})")
+
+                    # 변경사항 감지: None에서 유효한 값(0,1,-1)으로 변경되었거나, 값이 실제로 달라진 경우
+                    if (old_normalized is None and new_normalized in [0, 1, -1]) or (old_normalized != new_normalized):
+                        selenium_changes += 1
+                        has_changes = True
+                        self.logger.info(f"  ✅ 변경사항 감지: {company_name}")
+
+            if selenium_changes > 0:
+                self.logger.info(f"🔄 {selenium_changes}개 회사의 selenium_required 값 변경 감지")
+            else:
+                self.logger.info("❌ selenium_required 변경사항 없음")
+        else:
+            has_changes = not df_config.equals(original_df_config)
+
+        if has_changes:
+            # 데이터 손실 방지: 행 개수가 줄어들면 업데이트 중지
+            if len(df_config) < len(original_df_config):
+                self.logger.warning(f"⚠️ 데이터 손실 방지: 원본({len(original_df_config)}개) 대비 현재({len(df_config)}개)로 행이 줄어들었습니다. 시트 업데이트를 건너뜁니다.")
+            else:
+                self.logger.info("Google Sheets에 변경 사항 업데이트 중...")
+                self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+                self.logger.info("✅ Google Sheets 업데이트 완료")
         else:
             self.logger.info("설정 변경 사항이 없어 Google Sheets 업데이트를 건너뜁니다.")
 
-        current_jobs, failed_companies = self.crawl_jobs(df_config)
+        # 크롤링도 제한된 범위에서만 수행
+        if "5000대" in self.worksheet_name:
+            current_jobs, failed_companies = self.crawl_jobs(df_processed)
+        else:
+            current_jobs, failed_companies = self.crawl_jobs(df_config)
         self.compare_and_notify(current_jobs, failed_companies)
         self.logger.info(f"✅ Job Monitoring DAG 종료 - {self.worksheet_name}")
 
     def preprocess_companies(self, df: pd.DataFrame) -> pd.DataFrame:
         self.logger.info("--- 1. 전처리 시작 ---")
 
-        # 빈 회사 이름과 빈 job_posting_url을 가진 행들 필터링
-        df = df[
+        # 전체 회사 수 로그
+        self.logger.info(f"전체 회사 데이터: {len(df)}개")
+
+        # 유효한 회사 이름과 job_posting_url을 가진 행들만 처리 대상으로 선별 (원본 DataFrame은 유지)
+        valid_companies_mask = (
             df['회사_한글_이름'].notna() & (df['회사_한글_이름'].str.strip() != '') &
             df['job_posting_url'].notna() & (df['job_posting_url'].str.strip() != '')
-        ]
-        self.logger.info(f"유효한 회사 데이터 (URL 포함): {len(df)}개")
+        )
 
-        # 1. 먼저 모든 회사의 selenium_required 값을 자동 채우기
-        self._fill_missing_selenium_required(df)
+        # URL이 없는 회사들 수 로그
+        invalid_count = len(df) - valid_companies_mask.sum()
+        if invalid_count > 0:
+            self.logger.info(f"URL이 없어 전처리에서 제외되는 회사: {invalid_count}개 (시트에서는 유지됨)")
 
-        # 2. selector가 없고 original_selector도 없으며, selenium_required가 -1이 아닌 회사들만 처리
+        self.logger.info(f"전처리 대상 회사 (URL 포함): {valid_companies_mask.sum()}개")
+
+        # 1. 먼저 유효한 회사들의 selenium_required 값을 자동 채우기
+        self._fill_missing_selenium_required(df[valid_companies_mask])
+
+        # 2. selector가 없고 original_selector도 없으며, selenium_required가 -1이 아닌 회사들만 처리 (유효한 회사 중에서)
         companies_to_process = df[
+            valid_companies_mask &
             (df['selector'].isna() | (df['selector'] == '')) &
             (df['original_selector'].isna() | (df['original_selector'] == '')) &
             (df['selenium_required'] != -1)  # HTML 저장 실패로 스킵된 회사는 제외
@@ -318,27 +400,38 @@ class JobMonitoringDAG:
         for index, row in missing_selenium.iterrows():
             company_name = row['회사_한글_이름']
             url = row['job_posting_url']
-            
+
             selenium_required = self._determine_selenium_requirement(url, company_name)
-            df.loc[index, 'selenium_required'] = selenium_required
-            
+
+            # DataFrame에 직접 할당하고 명시적으로 int로 변환
+            df.at[index, 'selenium_required'] = int(selenium_required)
+
+            # 할당 후 값 확인
+            stored_value = df.at[index, 'selenium_required']
+            self.logger.info(f"    💾 저장된 값 확인: {stored_value} (type: {type(stored_value)})")
+
             selenium_text = "Selenium 필요" if selenium_required else "requests 사용"
             self.logger.info(f"  - {company_name}: {selenium_text}")
     
     def _determine_selenium_requirement(self, url: str, _: str) -> int:
         """URL을 기반으로 Selenium 필요 여부를 동적으로 판단합니다."""
-        
+
         # 모든 사이트에 대해 실제로 체크해서 판단
         try:
             selenium_req = self.selenium_checker.check_selenium_requirement(url)
-            return int(selenium_req)
-        except Exception:
+            result = int(selenium_req)
+            self.logger.info(f"    🔍 Selenium 체크 결과: {url} -> {result}")
+            return result
+        except Exception as e:
             # 체크 실패 시 안전하게 Selenium 사용
+            self.logger.info(f"    ⚠️ Selenium 체크 실패 ({url}): {e} -> 기본값 1 사용")
             return 1
 
     def crawl_jobs(self, df_config: pd.DataFrame) -> Tuple[Dict[str, Set[str]], List[Dict]]:
         self.logger.info("--- 3. 채용 공고 크롤링 시작 ---")
         df_crawl = df_config[
+            (df_config['회사_한글_이름'].notna() & (df_config['회사_한글_이름'].str.strip() != '')) &
+            (df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')) &
             (df_config['selector'].notna() & (df_config['selector'] != '')) &
             (df_config['selenium_required'] != -1)  # HTML 저장 실패로 스킵된 회사는 제외
         ].copy()

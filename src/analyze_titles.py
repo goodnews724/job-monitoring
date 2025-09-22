@@ -41,6 +41,14 @@ class JobPostingSelectorAnalyzer:
             '.privacy',
             '.terms'
         ]
+        # DOM 구조 기반 필터링을 위한 영역 정의
+        self.excluded_sections = ['nav', 'header', 'footer', 'aside', 'sidebar']
+        self.ui_element_patterns = [
+            r'(blog|youtube|facebook|instagram|twitter|linkedin)',  # 소셜미디어
+            r'(바로가기|more|view|link|copy|share|공유)',  # 버튼/링크 텍스트
+            r'(faq|q&a|notice|contact|about|문의|공지)',  # 정보성 메뉴
+            r'^(talent|careers?|culture|people)$',  # 채용 관련 메뉴명
+        ]
         self.logger = self._setup_logger()
 
     def _setup_logger(self) -> logging.Logger:
@@ -102,6 +110,11 @@ class JobPostingSelectorAnalyzer:
             r'^(.*\s*바로가기)$',  # "채용공고 바로가기" 등
             r'^(채용정보|직무소개|복리후생|기업문화|회사소개|오시는길|Contact|문의하기)\s*(바로가기)?.*$',  # 주요 네비게이션 메뉴들
         ]
+
+        # 새로 추가된 UI 요소 패턴들 적용
+        for pattern in self.ui_element_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return False
 
         for pattern in self.exclude_patterns + ui_elements:
             if re.search(pattern, text, re.IGNORECASE):
@@ -346,7 +359,7 @@ class JobPostingSelectorAnalyzer:
         for link in soup.find_all('a', href=True):
             if any(parent.name in self.blacklist or any(b in (parent.get('class', []) + ([parent.get('id')] if parent.get('id') else [])) for b in self.blacklist) for parent in link.find_parents()):
                 continue
-            
+
             text = link.get_text(strip=True)
             if self._is_potential_job_posting(text) and len(text) > 5:  # 링크 조건 완화
                 link_elements.append(link)
@@ -497,9 +510,31 @@ class JobPostingSelectorAnalyzer:
 
         def is_blacklisted_selector(selector):
             """선택자가 블랙리스트에 있는지 확인"""
+            # 기본 블랙리스트
             for blacklisted in self.selector_blacklist:
                 if blacklisted in selector:
                     return True
+
+            # 너무 일반적인 선택자들 금지
+            generic_selectors = [
+                'a[href]',  # 모든 링크
+                'a',        # 모든 링크
+                'div > a',  # 너무 일반적
+                'li > a',   # 너무 일반적 (하지만 구체적인 컨텍스트가 있으면 허용)
+                'td > a',   # 너무 일반적
+                'p > a',    # 너무 일반적
+                'tr > td',  # 너무 일반적
+                'ul > li',  # 너무 일반적
+                'div > p',  # 너무 일반적
+                'li',       # 너무 일반적
+                'td',       # 너무 일반적
+                'dt',       # 너무 일반적
+            ]
+
+            # 단순히 태그만 있는 선택자는 금지
+            if selector.strip() in generic_selectors:
+                return True
+
             return False
 
         def clean_selector(selector):
