@@ -1,6 +1,7 @@
 x-airflow-common: &airflow-common
   # build: .
   image: goodnews724/kowork-scaper-arm:latest
+  platform: linux/arm64
   env_file:
     - ./.env
   environment:
@@ -26,6 +27,7 @@ x-airflow-common: &airflow-common
 services:
   postgres:
     image: postgres:13
+    platform: linux/arm64
     environment:
       - POSTGRES_USER=airflow
       - POSTGRES_PASSWORD=airflow
@@ -42,6 +44,7 @@ services:
 
   redis:
     image: redis:latest
+    platform: linux/arm64
     ports:
       - "6379:6379"
     healthcheck:
@@ -52,7 +55,7 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
-    command: webserver
+    command: bash -c "airflow db init && airflow webserver"
     ports:
       - "8080:8080"
     healthcheck:
