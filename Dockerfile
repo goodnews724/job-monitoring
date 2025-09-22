@@ -2,19 +2,21 @@ FROM apache/airflow:2.8.1
 
 USER root
 
-# Change the default shell to a more standard one
-SHELL ["/bin/bash", "-c"]
+# Set ARG for architecture
+ARG TARGETARCH
 
-# Overwrite sources.list to use standard Debian repositories, then update
-RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list && \
-    echo "deb http://deb.debian.org/debian bullseye-updates main" >> /etc/apt/sources.list && \
-    echo "deb http://security.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list && \
-    apt-get update
-
-# Install dependencies including chromium
-RUN apt-get install -y --no-install-recommends \
-    chromium-browser \
-    && rm -rf /var/lib/apt/lists/*
+# Install browser based on architecture
+RUN apt-get update && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get install -y --no-install-recommends chromium-browser; \
+    else \
+        apt-get install -y --no-install-recommends wget gnupg && \
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
+        sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list' && \
+        apt-get update && \
+        apt-get install -y --no-install-recommends google-chrome-stable; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
 
 USER airflow
 
