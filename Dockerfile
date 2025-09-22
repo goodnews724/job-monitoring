@@ -5,8 +5,11 @@ USER root
 # Change the default shell to a more standard one
 SHELL ["/bin/bash", "-c"]
 
-# Update package lists
-RUN apt-get update
+# Overwrite sources.list to use standard Debian repositories, then update
+RUN echo "deb http://deb.debian.org/debian bullseye main" > /etc/apt/sources.list && \
+    echo "deb http://deb.debian.org/debian bullseye-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://security.debian.org/debian-security bullseye-security main" >> /etc/apt/sources.list && \
+    apt-get update
 
 # Install dependencies including chromium
 RUN apt-get install -y --no-install-recommends \
