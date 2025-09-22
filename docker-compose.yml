@@ -1,6 +1,6 @@
 x-airflow-common: &airflow-common
-  build: .
-  platform: linux/amd64
+  # build: .
+  image: goodnews724/kowork-scaper-arm:latest
   env_file:
     - ./.env
   environment:
@@ -26,7 +26,6 @@ x-airflow-common: &airflow-common
 services:
   postgres:
     image: postgres:13
-    platform: linux/amd64
     environment:
       - POSTGRES_USER=airflow
       - POSTGRES_PASSWORD=airflow
@@ -43,7 +42,6 @@ services:
 
   redis:
     image: redis:latest
-    platform: linux/amd64
     ports:
       - "6379:6379"
     healthcheck:
