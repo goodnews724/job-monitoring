@@ -2,8 +2,7 @@ beautifulsoup4
 requests
 pandas
 numpy
-selenium
-webdriver-manager
+playwright
 python-dotenv
 lxml
 html5lib

@@ -4,10 +4,7 @@ import pandas as pd
 import requests
 import re
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright
 from datetime import datetime
 import pytz
 import logging
@@ -104,10 +101,7 @@ class JobMonitoringDAG:
         url = row['job_posting_url']
         self.logger.info(f"- {company_name} 처리 중...")
 
-        driver = self.create_minimal_driver() if row['selenium_required'] else None
-        html_content = self.get_html_content(url, row['selenium_required'], driver)
-        if driver:
-            driver.quit()
+        html_content = self.get_html_content(url, row['selenium_required'])
 
         if html_content:
             self.logger.info(f"  - HTML 가져오기 성공")
@@ -353,10 +347,7 @@ class JobMonitoringDAG:
         self.company_urls[company_name] = url
         self.logger.info(f"- {company_name} 크롤링 중...")
 
-        driver = self.create_minimal_driver() if use_selenium else None
-        html_content = self.get_html_content_for_crawling(url, use_selenium, driver, selector)
-        if driver:
-            driver.quit()
+        html_content = self.get_html_content_for_crawling(url, use_selenium, selector)
 
         if not html_content:
             return None, {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url}
@@ -416,8 +407,8 @@ class JobMonitoringDAG:
             self.save_jobs(current_jobs)
         self.logger.info("--- 4. 비교 및 알림 종료 ---")
 
-    def get_html_content(self, url, use_selenium, driver=None, selector=None):
-        """선택자 분석용 HTML 가져오기 메서드 (HTML 파일 저장용)"""
+    def get_html_content(self, url, use_selenium, selector=None):
+        """선택자 분석용 HTML 가져오기 메서드 (Playwright 사용)"""
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -426,24 +417,29 @@ class JobMonitoringDAG:
                     response.raise_for_status()
                     return response.text
                 else:
-                    if driver is None: raise Exception("Selenium Driver가 없습니다.")
-                    driver.get(url)
+                    playwright, browser = self.create_playwright_browser()
+                    if not playwright or not browser:
+                        raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
-                    if selector:
-                        from selenium.webdriver.common.by import By
-                        from selenium.webdriver.support.ui import WebDriverWait
-                        from selenium.webdriver.support import expected_conditions as EC
-                        try:
-                            WebDriverWait(driver, 20).until(
-                                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                            )
-                            time.sleep(3)
-                        except Exception:
-                            self.logger.warning(f"''{selector}'' 요소를 기다리는 데 실패했습니다.")
-                    else:
-                        time.sleep(5)
+                    try:
+                        page = browser.new_page()
+                        page.goto(url, timeout=20000)
 
-                    return driver.page_source
+                        if selector:
+                            try:
+                                page.wait_for_selector(selector, timeout=20000)
+                                time.sleep(3)
+                            except Exception:
+                                self.logger.warning(f"'{selector}' 요소를 기다리는 데 실패했습니다.")
+                        else:
+                            time.sleep(5)
+
+                        html_content = page.content()
+                        return html_content
+                    finally:
+                        browser.close()
+                        playwright.stop()
+
             except Exception as e:
                 if "timeout" in str(e).lower() and attempt < max_retries - 1:
                     self.logger.warning(f"페이지 로드 타임아웃 ({attempt + 1}/{max_retries}): {url} - 재시도 중...")
@@ -453,37 +449,37 @@ class JobMonitoringDAG:
                     self.logger.error(f"HTML 가져오기 실패: {url}, 오류: {e}")
                     return None
 
-    def get_html_content_for_crawling(self, url, use_selenium, driver=None, selector=None):
-        """실제 크롤링용 HTML 가져오기 메서드 (selenium_required 값에 따라 분기)"""
+    def get_html_content_for_crawling(self, url, use_selenium, selector=None):
+        """실제 크롤링용 HTML 가져오기 메서드 (Playwright 사용)"""
         try:
             if not use_selenium:
                 response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
                 response.raise_for_status()
                 return response.text
             else:
-                if driver is None:
-                    raise Exception("Selenium Driver가 없습니다.")
+                playwright, browser = self.create_playwright_browser()
+                if not playwright or not browser:
+                    raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
                 max_retries = 2
                 for attempt in range(max_retries):
                     try:
-                        driver.get(url)
+                        page = browser.new_page()
+                        page.goto(url, timeout=20000)
 
                         if selector:
-                            from selenium.webdriver.common.by import By
-                            from selenium.webdriver.support.ui import WebDriverWait
-                            from selenium.webdriver.support import expected_conditions as EC
                             try:
-                                WebDriverWait(driver, 20).until(
-                                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                                )
+                                page.wait_for_selector(selector, timeout=20000)
                                 time.sleep(3)
                             except Exception:
                                 self.logger.warning(f"선택자 '{selector}' 요소를 기다리는 데 실패했습니다.")
                         else:
                             time.sleep(5)
 
-                        return driver.page_source
+                        html_content = page.content()
+                        browser.close()
+                        playwright.stop()
+                        return html_content
 
                     except Exception as e:
                         if "timeout" in str(e).lower() and attempt < max_retries - 1:
@@ -491,89 +487,33 @@ class JobMonitoringDAG:
                             time.sleep(5)
                             continue
                         else:
+                            browser.close()
+                            playwright.stop()
                             raise e
 
         except Exception as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패: {url}, 오류: {e}")
             return None
 
-    def create_minimal_driver(self):
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-software-rasterizer")
-        chrome_options.add_argument("--disable-background-timer-throttling")
-        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-        chrome_options.add_argument("--disable-renderer-backgrounding")
-        chrome_options.add_argument("--disable-features=TranslateUI")
-        chrome_options.add_argument("--disable-ipc-flooding-protection")
-        chrome_options.add_argument("--disable-hang-monitor")
-        chrome_options.add_argument("--disable-client-side-phishing-detection")
-        chrome_options.add_argument("--disable-popup-blocking")
-        chrome_options.add_argument("--disable-prompt-on-repost")
-        chrome_options.add_argument("--disable-sync")
-        chrome_options.add_argument("--disable-web-resources")
-        chrome_options.add_argument("--disable-plugins")
-        chrome_options.add_argument("--disable-images")
-        chrome_options.add_argument("--ignore-certificate-errors")
-        chrome_options.add_argument("--allow-running-insecure-content")
-        chrome_options.add_argument("--disable-web-security")
-        chrome_options.add_argument("--allow-running-insecure-content")
-        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-logging")
-        chrome_options.add_argument("--disable-login-animations")
-        chrome_options.add_argument("--disable-notifications")
-        chrome_options.add_experimental_option("useAutomationExtension", False)
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_argument("--remote-debugging-port=0")
-
-        import os
-        import platform
-
-        # 가능한 ChromeDriver 경로들
-        chromedriver_paths = [
-            "/usr/bin/chromedriver",
-            "/usr/lib/chromium-browser/chromedriver"
-        ]
-
-        # 가능한 Chrome/Chromium 바이너리 경로들
-        chrome_binaries = [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium"
-        ]
-
-        # ChromeDriver 찾기
-        chromedriver_path = None
-        for path in chromedriver_paths:
-            if os.path.exists(path):
-                chromedriver_path = path
-                break
-
-        # Chrome/Chromium 바이너리 찾기
-        chrome_binary = None
-        for binary in chrome_binaries:
-            if os.path.exists(binary):
-                chrome_binary = binary
-                break
-
-        if chromedriver_path and chrome_binary:
-            self.logger.info(f"Using chromedriver: {chromedriver_path}, browser: {chrome_binary}")
-            if chrome_binary != "/usr/bin/google-chrome-stable":
-                chrome_options.binary_location = chrome_binary
-            driver = webdriver.Chrome(service=Service(executable_path=chromedriver_path), options=chrome_options)
-        else:
-            # ARM64나 호환되지 않는 환경에서는 Selenium 사용하지 않고 requests만 사용
-            self.logger.warning(f"ChromeDriver not found. chromedriver_path={chromedriver_path}, chrome_binary={chrome_binary}")
-            self.logger.warning("Selenium이 필요한 사이트는 크롤링할 수 없습니다. requests만 사용합니다.")
-            return None
-
-        driver.set_page_load_timeout(20)
-        return driver
+    def create_playwright_browser(self):
+        """Playwright 브라우저 인스턴스 생성"""
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor"
+                ]
+            )
+            self.logger.info("Playwright 브라우저 실행 성공")
+            return playwright, browser
+        except Exception as e:
+            self.logger.error(f"Playwright 브라우저 실행 실패: {e}")
+            return None, None
 
     def load_existing_jobs(self) -> Dict[str, Set[str]]:
         if not os.path.exists(self.results_path):
