@@ -505,9 +505,33 @@ class JobMonitoringDAG:
 
         # Try system chromedriver first, fallback to ChromeDriverManager
         import os
+        import platform
+
         if os.path.exists("/usr/bin/chromedriver"):
             self.logger.info("Using system chromedriver at /usr/bin/chromedriver")
             driver = webdriver.Chrome(service=Service(executable_path="/usr/bin/chromedriver"), options=chrome_options)
+        elif os.path.exists("/usr/bin/chromium-browser"):
+            # ARM64 환경에서 chromium-browser 사용
+            self.logger.info("Using chromium-browser for ARM64")
+            chrome_options.binary_location = "/usr/bin/chromium-browser"
+            # ARM64에서는 chromium-chromedriver 패키지로 설치된 경로 시도
+            chromedriver_paths = [
+                "/usr/lib/chromium-browser/chromedriver",
+                "/usr/bin/chromedriver"
+            ]
+
+            chromedriver_path = None
+            for path in chromedriver_paths:
+                if os.path.exists(path):
+                    chromedriver_path = path
+                    break
+
+            if chromedriver_path:
+                self.logger.info(f"Using chromedriver at {chromedriver_path}")
+                driver = webdriver.Chrome(service=Service(executable_path=chromedriver_path), options=chrome_options)
+            else:
+                self.logger.error("No compatible chromedriver found for ARM64")
+                raise Exception("ChromeDriver not found for ARM64 architecture")
         else:
             self.logger.info("System chromedriver not found, using ChromeDriverManager")
             driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
