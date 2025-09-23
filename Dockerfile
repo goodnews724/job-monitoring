@@ -8,7 +8,7 @@ ARG TARGETARCH
 # Install browser based on architecture
 RUN apt-get update && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        apt-get install -y --no-install-recommends chromium; \
+        apt-get install -y --no-install-recommends chromium chromium-chromedriver; \
     else \
         apt-get install -y --no-install-recommends wget gnupg && \
         wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
