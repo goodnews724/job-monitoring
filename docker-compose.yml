@@ -1,7 +1,7 @@
 x-airflow-common: &airflow-common
-  # build: .
-  image: goodnews724/kowork-scaper-arm:latest
-  platform: linux/arm64
+  build: .
+  # image: goodnews724/kowork-scaper-arm:latest
+  # platform: linux/arm64
   env_file:
     - ./.env
   environment:
