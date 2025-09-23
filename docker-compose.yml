@@ -13,6 +13,13 @@ x-airflow-common: &airflow-common
     - GOOGLE_SHEET_KEY=${GOOGLE_SHEET_KEY}
     - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
     - TOP5000COMPANY_URL=${TOP5000COMPANY_URL}
+    # Airflow 관리자 계정 자동 생성
+    - _AIRFLOW_WWW_USER_USERNAME=admin
+    - _AIRFLOW_WWW_USER_PASSWORD=admin123
+    - _AIRFLOW_WWW_USER_EMAIL=admin@example.com
+    - _AIRFLOW_WWW_USER_FIRSTNAME=Admin
+    - _AIRFLOW_WWW_USER_LASTNAME=User
+    - _AIRFLOW_WWW_USER_ROLE=Admin
   volumes:
     - ./src:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -55,7 +62,7 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
-    command: bash -c "airflow db init && airflow webserver"
+    command: bash -c "airflow db init && airflow users create --username admin --password admin123 --firstname Admin --lastname User --role Admin --email admin@example.com || true && airflow webserver"
     ports:
       - "8080:8080"
     healthcheck:
