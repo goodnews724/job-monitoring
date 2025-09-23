@@ -573,8 +573,22 @@ class JobMonitoringDAG:
         kst = pytz.timezone('Asia/Seoul')
         current_time_kst = datetime.now(kst)
         all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
-        pd.DataFrame(all_postings).to_csv(self.results_path, index=False, encoding='utf-8-sig')
-        self.logger.info(f"결과를 '{self.results_path}'에 저장했습니다.")
+
+        try:
+            pd.DataFrame(all_postings).to_csv(self.results_path, index=False, encoding='utf-8-sig')
+            self.logger.info(f"결과를 '{self.results_path}'에 저장했습니다.")
+        except PermissionError as e:
+            self.logger.error(f"파일 저장 권한 오류: {e}")
+            # 대안 경로 시도
+            import tempfile
+            temp_path = os.path.join(tempfile.gettempdir(), 'job_postings_latest.csv')
+            try:
+                pd.DataFrame(all_postings).to_csv(temp_path, index=False, encoding='utf-8-sig')
+                self.logger.info(f"임시 경로에 결과를 저장했습니다: '{temp_path}'")
+            except Exception as e2:
+                self.logger.error(f"임시 파일 저장도 실패: {e2}")
+        except Exception as e:
+            self.logger.error(f"파일 저장 중 오류 발생: {e}")
 
     def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List):
         if not self.webhook_url:
