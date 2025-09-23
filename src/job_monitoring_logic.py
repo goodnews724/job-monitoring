@@ -502,7 +502,16 @@ class JobMonitoringDAG:
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        driver = webdriver.Chrome(service=Service(executable_path="/usr/bin/chromedriver"), options=chrome_options)
+
+        # Try system chromedriver first, fallback to ChromeDriverManager
+        import os
+        if os.path.exists("/usr/bin/chromedriver"):
+            self.logger.info("Using system chromedriver at /usr/bin/chromedriver")
+            driver = webdriver.Chrome(service=Service(executable_path="/usr/bin/chromedriver"), options=chrome_options)
+        else:
+            self.logger.info("System chromedriver not found, using ChromeDriverManager")
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
         driver.set_page_load_timeout(20)
         return driver
 
