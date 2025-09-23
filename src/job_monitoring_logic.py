@@ -533,7 +533,7 @@ class JobMonitoringDAG:
         warnings = []
         for company, new_list in new_jobs.items():
             if len(existing_jobs.get(company, set())) > 0 and len(new_list) == len(current_jobs.get(company, set())):
-                warnings.append(f"{company}: 모든 공고가 신규입니다. 전체 채용 페이지를 확인해주세요.")
+                warnings.append(f"{company}: 기존 공고가 모두 사라지고 새로운 공고만 보입니다. 홈페이지를 직접 확인해주세요.")
         return warnings
 
     def save_jobs(self, current_jobs: Dict):
@@ -593,7 +593,7 @@ class JobMonitoringDAG:
                 messages_to_send.append(current_message.strip())
 
         if warnings:
-            warning_msg = "⚠️ *의심스러운 결과* (직접 확인 필요)\n"
+            warning_msg = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)\n"
             for warning in warnings:
                 warning_msg += f"• {warning}\n"
             messages_to_send.append(warning_msg.strip())
