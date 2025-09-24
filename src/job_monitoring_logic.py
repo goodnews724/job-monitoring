@@ -211,7 +211,7 @@ class JobMonitoringDAG:
                 return True
         return False
 
-    def _highlight_foreign_keywords(self, job_title: str) -> tuple[str, bool]:
+    def _highlight_foreign_keywords(self, job_title: str) -> Tuple[str, bool]:
         """채용공고 제목에서 외국인 키워드를 볼드처리하고, 외국인 공고인지 여부를 반환합니다."""
         if not self.foreign_keywords:
             return job_title, False
