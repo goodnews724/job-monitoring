@@ -61,21 +61,13 @@ class JobMonitoringDAG:
 
         if self.worksheet_name == '5000대_기업':
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
-            
+
             chunk_size = 100
             num_chunks = (len(df_to_process) - 1) // chunk_size + 1
             self.logger.info(f"'{self.worksheet_name}' 시트의 {len(df_to_process)}개 기업을 {num_chunks}개 청크로 분할하여 처리합니다.")
 
             all_current_jobs = {}
-            
-            self.logger.info("--- 전체 기업 전처리 및 선택자 안정화 시작 ---")
-            df_processed_all = self.preprocess_companies(df_to_process)
-            df_processed_all = self.stabilize_selectors(df_processed_all)
-            self.logger.info("--- 전체 기업 전처리 및 선택자 안정화 종료 ---")
-
-            df_config.update(df_processed_all)
-
-            list_of_df_chunks = [df_processed_all.iloc[i:i+chunk_size] for i in range(0, len(df_processed_all), chunk_size)]
+            list_of_df_chunks = [df_to_process.iloc[i:i+chunk_size] for i in range(0, len(df_to_process), chunk_size)]
 
             for i, df_chunk in enumerate(list_of_df_chunks):
                 start_num = i * chunk_size + 1
@@ -83,11 +75,25 @@ class JobMonitoringDAG:
                 chunk_info = f"{start_num}-{end_num}번째 기업"
                 self.logger.info(f"--- 청크 처리 시작: {chunk_info} ({len(df_chunk)}개 기업) ---")
 
-                current_jobs_chunk, failed_companies_chunk = self.crawl_jobs(df_chunk)
+                # 각 청크별로 통합 처리 (전처리 + 크롤링)
+                self.logger.info(f"청크 {i+1}/{num_chunks} 통합 처리 시작")
+                df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_integrated(df_chunk)
+
+                # 전체 DataFrame에 업데이트
+                df_config.update(df_chunk_processed)
                 all_current_jobs.update(current_jobs_chunk)
-                
+
+                # 100개 청크마다 안전한 중간 저장
+                self.logger.info(f"청크 {i+1}/{num_chunks} Google Sheets 안전 업데이트 중...")
+                try:
+                    # 헤더를 유지하면서 데이터만 업데이트
+                    self.sheet_manager.safe_update_rows(df_config, self.worksheet_name)
+                    self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 시트 안전 업데이트 완료 (총 {len(df_config)} 회사)")
+                except Exception as e:
+                    self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
+
                 self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False)
-                
+
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
                 if i < num_chunks - 1:
                     self.logger.info(f"다음 청크 처리를 위해 1분간 대기합니다.")
@@ -103,13 +109,8 @@ class JobMonitoringDAG:
         else:
             original_df_config = df_config.copy()
 
-            self.logger.info("--- 1. 전처리 시작 ---")
-            df_processed = self.preprocess_companies(df_config)
-            self.logger.info("--- 1. 전처리 종료 ---")
-
-            self.logger.info("--- 2. 선택자 안정화 시작 ---")
-            df_processed = self.stabilize_selectors(df_processed)
-            self.logger.info("--- 2. 선택자 안정화 종료 ---")
+            self.logger.info("--- 통합 처리 시작 (전처리 + 크롤링) ---")
+            df_processed, current_jobs, failed_companies = self.process_companies_integrated(df_config)
 
             updated_count = 0
             for idx in df_processed.index:
@@ -134,36 +135,119 @@ class JobMonitoringDAG:
             else:
                 self.logger.info("설정 변경 사항이 없어 Google Sheets 업데이트를 건너뜁니다.")
 
-            current_jobs, failed_companies = self.crawl_jobs(df_processed)
             self.compare_and_notify(current_jobs, failed_companies)
 
         self.logger.info(f"✅ Job Monitoring DAG 종료 - {self.worksheet_name}")
 
-    def _process_company_preprocess(self, args):
+    def _process_company_complete(self, args):
+        """선택자 찾기와 공고 수집을 한번에 처리"""
         index, row, existing_selectors = args
         company_name = row['회사_한글_이름']
         url = row['job_posting_url']
+        selector = row.get('selector', '')
+        use_selenium = row['selenium_required']
+
         self.logger.info(f"- {company_name} 처리 중...")
+        self.company_urls[company_name] = url
 
-        html_content = self.get_html_content(url, row['selenium_required'])
+        html_content = self.get_html_content_for_crawling(url, use_selenium)
 
-        if html_content:
-            self.logger.info(f"  - HTML 가져오기 성공")
+        if not html_content:
+            self.logger.error(f"  - HTML 가져오기 실패: {company_name}")
+            return index, None, None, {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url}
+
+        try:
             soup = BeautifulSoup(html_content, 'html.parser')
-            found_selector = self._try_existing_selectors(soup, existing_selectors, company_name)
 
-            if found_selector:
-                return index, found_selector, None
-            else:
-                best_selector, _ = self.selector_analyzer.find_best_selector(soup)
-                if best_selector:
-                    return index, best_selector, None
+            # 선택자가 없거나 빈 경우 새로 찾기
+            if not selector or selector.strip() == '':
+                self.logger.info(f"  - {company_name} 선택자 찾기 중...")
+                found_selector = self._try_existing_selectors(soup, existing_selectors, company_name)
+
+                if found_selector:
+                    selector = found_selector
+                    self.logger.info(f"  - 기존 선택자 적용 성공: {selector}")
                 else:
-                    self.logger.warning("  - 선택자 분석 실패")
-                    return index, None, None
-        else:
-            self.logger.error(f"  - HTML 가져오기 실패: {company_name} (selenium_required를 -1로 설정)")
-            return index, None, -1
+                    best_selector, _ = self.selector_analyzer.find_best_selector(soup)
+                    if best_selector:
+                        selector = best_selector
+                        self.logger.info(f"  - 새 선택자 찾기 성공: {selector}")
+                    else:
+                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패")
+                        return index, None, None, {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url}
+            else:
+                self.logger.info(f"  - 기존 선택자 사용: {selector}")
+
+            # 같은 HTML로 공고 수집
+            postings = soup.select(selector)
+            if not postings:
+                return index, selector, None, {'company': company_name, 'reason': f'선택자 \'{selector}\'로 공고를 찾지 못함', 'url': url}
+
+            # 모든 텍스트 추출 후 필터링
+            all_texts = [post.get_text(strip=True) for post in postings if post.get_text(strip=True).strip()]
+            # 채용공고가 맞는 것들만 필터링
+            job_titles = {text for text in all_texts if self.selector_analyzer._is_potential_job_posting(text)}
+
+            if job_titles:
+                self.logger.info(f"  - 성공: 선택자 적용 + {len(job_titles)}개 공고 수집")
+                return index, selector, job_titles, None
+            else:
+                return index, selector, None, {'company': company_name, 'reason': '유효한 공고를 찾지 못함', 'url': url}
+
+        except Exception as e:
+            self.logger.error(f"  - {company_name} 처리 중 오류 발생: {e}")
+            return index, None, None, {'company': company_name, 'reason': f'처리 중 오류: {e}', 'url': url}
+
+    def process_companies_integrated(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, List]:
+        """전처리와 크롤링을 한번에 통합 처리"""
+        self.logger.info(f"통합 처리 대상: {len(df)}개 회사")
+
+        # 1. selenium_required 값 채우기
+        valid_companies_mask = (
+            df['회사_한글_이름'].notna() & (df['회사_한글_이름'].str.strip() != '') &
+            df['job_posting_url'].notna() & (df['job_posting_url'].str.strip() != '')
+        )
+
+        if valid_companies_mask.any():
+            self._fill_missing_selenium_required(df, valid_companies_mask)
+
+        # 2. 처리 가능한 회사들 필터링
+        companies_to_process = df[
+            valid_companies_mask &
+            (df['selenium_required'] != -1)
+        ]
+
+        if companies_to_process.empty:
+            self.logger.info("처리할 회사가 없습니다.")
+            return df, {}, []
+
+        # 3. 기존 선택자 수집
+        existing_selectors = self._get_existing_selectors(df)
+        self.logger.info(f"기존 선택자 {len(existing_selectors)}개 (20자 이상만) 활용")
+
+        # 4. 통합 처리 (선택자 찾기 + 크롤링)
+        current_jobs = {}
+        failed_companies = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            args_list = [(index, row, existing_selectors) for index, row in companies_to_process.iterrows()]
+            results = executor.map(self._process_company_complete, args_list)
+
+            for index, selector, job_titles, error_info in results:
+                if selector:
+                    df.loc[index, 'selector'] = selector
+
+                if job_titles:
+                    company_name = companies_to_process.loc[index, '회사_한글_이름']
+                    current_jobs[company_name] = job_titles
+                elif error_info:
+                    failed_companies.append(error_info)
+
+        # 5. 선택자 안정화
+        df = self.stabilize_selectors(df)
+
+        self.logger.info(f"통합 처리 완료: 성공 {len(current_jobs)}개, 실패 {len(failed_companies)}개")
+        return df, current_jobs, failed_companies
 
     def preprocess_companies(self, df: pd.DataFrame) -> pd.DataFrame:
         self.logger.info(f"전체 회사 데이터: {len(df)}개")

@@ -61,14 +61,14 @@ class GoogleSheetManager:
         """DataFrame의 데이터로 시트 전체를 업데이트합니다."""
         if not self.gc:
             return False
-        
+
         try:
             spreadsheet = self.gc.open_by_key(self.sheet_key)
             if sheet_name:
                 worksheet = spreadsheet.worksheet(sheet_name)
             else:
                 worksheet = spreadsheet.sheet1
-            
+
             # 기존 데이터 삭제 후 DataFrame으로 업데이트
             worksheet.clear()
             worksheet.update([df.columns.values.tolist()] + df.values.tolist())
@@ -76,4 +76,43 @@ class GoogleSheetManager:
             return True
         except Exception as e:
             self.logger.error(f"❌ 시트 업데이트 실패: {e}")
+            return False
+
+    def safe_update_rows(self, df: pd.DataFrame, sheet_name: str, start_row: int = 2):
+        """기존 헤더를 유지하면서 특정 행부터 안전하게 업데이트합니다."""
+        if not self.gc:
+            return False
+
+        try:
+            spreadsheet = self.gc.open_by_key(self.sheet_key)
+            if sheet_name:
+                worksheet = spreadsheet.worksheet(sheet_name)
+            else:
+                worksheet = spreadsheet.sheet1
+
+            # 현재 시트의 전체 행 수 확인
+            current_rows = len(worksheet.get_all_values())
+
+            # 업데이트할 데이터 준비 (헤더 제외)
+            values_to_update = df.values.tolist()
+
+            # 업데이트할 범위 계산
+            end_row = start_row + len(values_to_update) - 1
+            end_col = chr(ord('A') + len(df.columns) - 1)  # 컬럼 수에 따른 마지막 컬럼
+
+            # 기존 데이터보다 적으면 남은 행 삭제
+            if end_row < current_rows:
+                # 불필요한 행 삭제
+                delete_range = f"{start_row + len(values_to_update)}:{current_rows}"
+                worksheet.batch_clear([delete_range])
+
+            # 데이터 업데이트 (헤더는 그대로 두고)
+            update_range = f"A{start_row}:{end_col}{end_row}"
+            worksheet.update(update_range, values_to_update)
+
+            self.logger.info(f"✅ '{worksheet.title}' 시트 안전 업데이트 성공 (행 {start_row}~{end_row})")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ 시트 안전 업데이트 실패: {e}")
             return False
