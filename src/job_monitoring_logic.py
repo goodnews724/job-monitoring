@@ -225,8 +225,8 @@ class JobMonitoringDAG:
         html_content = self.get_html_content_for_crawling(url, use_selenium)
 
         if not html_content:
-            self.logger.error(f"  - HTML 가져오기 실패: {company_name}")
-            return index, None, None, {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url}
+            self.logger.error(f"  - HTML 가져오기 실패: {company_name} (selenium_required를 -1로 설정)")
+            return index, None, None, {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url, 'selenium_status': -1}
 
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -245,8 +245,8 @@ class JobMonitoringDAG:
                         selector = best_selector
                         self.logger.info(f"  - 새 선택자 찾기 성공: {selector}")
                     else:
-                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패")
-                        return index, None, None, {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url}
+                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패 (selenium_required를 -2로 설정)")
+                        return index, None, None, {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url, 'selenium_status': -2}
             else:
                 self.logger.info(f"  - 기존 선택자 사용: {selector}")
 
@@ -283,10 +283,10 @@ class JobMonitoringDAG:
         if valid_companies_mask.any():
             self._fill_missing_selenium_required(df, valid_companies_mask)
 
-        # 2. 처리 가능한 회사들 필터링
+        # 2. 처리 가능한 회사들 필터링 (HTML 실패(-1), 선택자 실패(-2) 제외)
         companies_to_process = df[
             valid_companies_mask &
-            (df['selenium_required'] != -1)
+            (~df['selenium_required'].isin([-1, -2]))
         ]
 
         if companies_to_process.empty:
@@ -313,6 +313,10 @@ class JobMonitoringDAG:
                     company_name = companies_to_process.loc[index, '회사_한글_이름']
                     current_jobs[company_name] = job_titles
                 elif error_info:
+                    # 실패 유형별로 selenium_required 값 설정
+                    if 'selenium_status' in error_info:
+                        df.loc[index, 'selenium_required'] = error_info['selenium_status']
+                        self.logger.info(f"  - {error_info['company']} selenium_required를 {error_info['selenium_status']}로 설정")
                     failed_companies.append(error_info)
 
         # 5. 선택자 안정화
@@ -342,7 +346,7 @@ class JobMonitoringDAG:
             valid_companies_mask &
             (df['selector'].isna() | (df['selector'] == '')) &
             (df['original_selector'].isna() | (df['original_selector'] == '')) &
-            (df['selenium_required'] != -1)
+            (~df['selenium_required'].isin([-1, -2]))
         ]
 
         if companies_to_process.empty:
@@ -575,7 +579,7 @@ class JobMonitoringDAG:
             (df_config['회사_한글_이름'].notna() & (df_config['회사_한글_이름'].str.strip() != '')) &
             (df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')) &
             (df_config['selector'].notna() & (df_config['selector'] != '')) &
-            (df_config['selenium_required'] != -1)
+            (~df_config['selenium_required'].isin([-1, -2]))
         ].copy()
 
         if df_crawl.empty:
