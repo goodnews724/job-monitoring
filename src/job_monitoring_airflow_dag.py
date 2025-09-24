@@ -56,8 +56,7 @@ with DAG(
 with DAG(
     'top5000_company_monitoring_dag',
     default_args=default_args,
-    description='A DAG to monitor top 5000 company job postings',
-    schedule_interval='0 10,15 * * *',  # 매일 10시, 15시 (KST)
+    schedule_interval='0 19 * * *',  # 매일 19시 (KST)
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
     catchup=False,
 ) as top5000_dag:

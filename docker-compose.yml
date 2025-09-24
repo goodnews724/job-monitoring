@@ -8,6 +8,7 @@ x-airflow-common: &airflow-common
     - AIRFLOW__CORE__EXECUTOR=LocalExecutor
     - AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL=30
     - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+    - MAX_WORKERS=${MAX_WORKERS:-3}
     - AIRFLOW_UID=50000
     - AIRFLOW_GID=0
     - GOOGLE_SHEET_KEY=${GOOGLE_SHEET_KEY}
@@ -30,6 +31,8 @@ x-airflow-common: &airflow-common
   depends_on:
     - postgres
     - redis
+  networks:
+    - airflow-network
 
 services:
   postgres:
@@ -48,6 +51,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - airflow-network
 
   redis:
     image: redis:latest
@@ -59,6 +64,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - airflow-network
 
   airflow-webserver:
     <<: *airflow-common
@@ -82,3 +89,7 @@ services:
 
 volumes:
   postgres-db:
+
+networks:
+  airflow-network:
+    driver: bridge
