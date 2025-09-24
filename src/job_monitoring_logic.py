@@ -33,6 +33,7 @@ class JobMonitoringDAG:
         self.results_path = os.path.join(self.data_dir, results_filename)
         self.webhook_url = os.getenv(webhook_url_env)
         self.company_urls = {}
+        self.max_workers = int(os.getenv('MAX_WORKERS', '3'))
 
         self._setup_logging()
 
@@ -58,41 +59,84 @@ class JobMonitoringDAG:
             self.logger.error(f"Google Sheets에서 설정 정보를 가져오지 못했습니다: {self.worksheet_name}")
             return
 
-        original_df_config = df_config.copy()
+        if self.worksheet_name == '5000대_기업':
+            df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
+            
+            chunk_size = 100
+            num_chunks = (len(df_to_process) - 1) // chunk_size + 1
+            self.logger.info(f"'{self.worksheet_name}' 시트의 {len(df_to_process)}개 기업을 {num_chunks}개 청크로 분할하여 처리합니다.")
 
-        self.logger.info("--- 1. 전처리 시작 ---")
-        df_processed = self.preprocess_companies(df_config)
-        self.logger.info("--- 1. 전처리 종료 ---")
+            all_current_jobs = {}
+            
+            self.logger.info("--- 전체 기업 전처리 및 선택자 안정화 시작 ---")
+            df_processed_all = self.preprocess_companies(df_to_process)
+            df_processed_all = self.stabilize_selectors(df_processed_all)
+            self.logger.info("--- 전체 기업 전처리 및 선택자 안정화 종료 ---")
 
-        self.logger.info("--- 2. 선택자 안정화 시작 ---")
-        df_processed = self.stabilize_selectors(df_processed)
-        self.logger.info("--- 2. 선택자 안정화 종료 ---")
+            df_config.update(df_processed_all)
 
-        updated_count = 0
-        for idx in df_processed.index:
-            if idx in df_config.index:
-                if pd.isna(original_df_config.loc[idx, 'selenium_required']) or original_df_config.loc[idx, 'selenium_required'] == '':
-                    if df_processed.loc[idx, 'selenium_required'] in [0, 1, -1]:
-                        updated_count += 1
-                df_config.loc[idx] = df_processed.loc[idx]
+            list_of_df_chunks = [df_processed_all.iloc[i:i+chunk_size] for i in range(0, len(df_processed_all), chunk_size)]
 
-        if updated_count > 0:
-            self.logger.info(f"📝 {updated_count}개 회사의 selenium_required 값이 업데이트되었습니다.")
+            for i, df_chunk in enumerate(list_of_df_chunks):
+                start_num = i * chunk_size + 1
+                end_num = start_num + len(df_chunk) - 1
+                chunk_info = f"{start_num}-{end_num}번째 기업"
+                self.logger.info(f"--- 청크 처리 시작: {chunk_info} ({len(df_chunk)}개 기업) ---")
 
-        has_changes = not df_config.equals(original_df_config)
+                current_jobs_chunk, failed_companies_chunk = self.crawl_jobs(df_chunk)
+                all_current_jobs.update(current_jobs_chunk)
+                
+                self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False)
+                
+                self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
+                if i < num_chunks - 1:
+                    self.logger.info(f"다음 청크 처리를 위해 1분간 대기합니다.")
+                    time.sleep(60)
 
-        if has_changes:
-            if len(df_config) < len(original_df_config):
-                self.logger.warning(f"⚠️ 데이터 손실 방지: 원본({len(original_df_config)}개) 대비 현재({len(df_config)}개)로 행이 줄어들었습니다. 시트 업데이트를 건너뜁니다.")
-            else:
-                self.logger.info("Google Sheets에 변경 사항 업데이트 중...")
-                self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
-                self.logger.info("✅ Google Sheets 업데이트 완료")
+            if all_current_jobs:
+                self.save_jobs(all_current_jobs)
+
+            self.logger.info("모든 청크 처리 완료. Google Sheets에 변경 사항 업데이트 중...")
+            self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+            self.logger.info("✅ Google Sheets 업데이트 완료")
+
         else:
-            self.logger.info("설정 변경 사항이 없어 Google Sheets 업데이트를 건너뜁니다.")
+            original_df_config = df_config.copy()
 
-        current_jobs, failed_companies = self.crawl_jobs(df_processed)
-        self.compare_and_notify(current_jobs, failed_companies)
+            self.logger.info("--- 1. 전처리 시작 ---")
+            df_processed = self.preprocess_companies(df_config)
+            self.logger.info("--- 1. 전처리 종료 ---")
+
+            self.logger.info("--- 2. 선택자 안정화 시작 ---")
+            df_processed = self.stabilize_selectors(df_processed)
+            self.logger.info("--- 2. 선택자 안정화 종료 ---")
+
+            updated_count = 0
+            for idx in df_processed.index:
+                if idx in df_config.index:
+                    if pd.isna(original_df_config.loc[idx, 'selenium_required']) or original_df_config.loc[idx, 'selenium_required'] == '':
+                        if df_processed.loc[idx, 'selenium_required'] in [0, 1, -1]:
+                            updated_count += 1
+                    df_config.loc[idx] = df_processed.loc[idx]
+
+            if updated_count > 0:
+                self.logger.info(f"📝 {updated_count}개 회사의 selenium_required 값이 업데이트되었습니다.")
+
+            has_changes = not df_config.equals(original_df_config)
+
+            if has_changes:
+                if len(df_config) < len(original_df_config):
+                    self.logger.warning(f"⚠️ 데이터 손실 방지: 원본({len(original_df_config)}개) 대비 현재({len(df_config)}개)로 행이 줄어들었습니다. 시트 업데이트를 건너뜁니다.")
+                else:
+                    self.logger.info("Google Sheets에 변경 사항 업데이트 중...")
+                    self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+                    self.logger.info("✅ Google Sheets 업데이트 완료")
+            else:
+                self.logger.info("설정 변경 사항이 없어 Google Sheets 업데이트를 건너뜁니다.")
+
+            current_jobs, failed_companies = self.crawl_jobs(df_processed)
+            self.compare_and_notify(current_jobs, failed_companies)
+
         self.logger.info(f"✅ Job Monitoring DAG 종료 - {self.worksheet_name}")
 
     def _process_company_preprocess(self, args):
@@ -152,9 +196,9 @@ class JobMonitoringDAG:
         self.logger.info(f"{len(companies_to_process)}개 회사에 대한 전처리를 시작합니다.")
 
         existing_selectors = self._get_existing_selectors(df)
-        self.logger.info(f"기존 회사들에서 사용 중인 선택자 {len(existing_selectors)}개를 우선 적용합니다.")
+        self.logger.info(f"기존 회사들에서 사용 중인 선택자 {len(existing_selectors)}개 (20자 이상만)를 우선 적용합니다.")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             args_list = [(index, row, existing_selectors) for index, row in companies_to_process.iterrows()]
             results = executor.map(self._process_company_preprocess, args_list)
 
@@ -190,39 +234,39 @@ class JobMonitoringDAG:
 
 
     def _get_existing_selectors(self, df: pd.DataFrame) -> List[str]:
-        """기존에 성공적으로 사용된 선택자들을 수집합니다."""
+        """기존에 성공적으로 사용된 선택자들을 수집합니다 (20자 이상만)."""
         existing_selectors = []
 
+        # 20자 이상의 선택자만 수집
         valid_selectors = df[df['selector'].notna() & (df['selector'] != '')]['selector'].unique()
+        valid_selectors = [s for s in valid_selectors if len(s) >= 20]
         existing_selectors.extend(valid_selectors)
 
         expanded_selectors = []
         for selector in valid_selectors:
             expanded_selectors.append(selector)
             stabilized = stabilize_selector(selector, conservative=False)
-            if stabilized != selector and stabilized:
+            if stabilized != selector and stabilized and len(stabilized) >= 20:
                 expanded_selectors.append(stabilized)
 
+        # known_good_selectors도 20자 이상만 포함
         known_good_selectors = [
             "a div.sc-9b56f69e-0.jlntFl",
             "div.JobPostingsJobPosting__Layout-sc-6ae888f2-0.ffnSOB div.JobPostingsJobPosting__Bottom-sc-6ae888f2-5.iXrIoX",
             "#jobList > div.jobList_info > div > a > span.title",
             "div.RecruitList_left__5MzDR div.RecruitList_title-wrapper__Gvh1r p",
             "div.swiper-slide button p",
-            "button div p",
-            "li.job-item a",
-            "td.job-title a",
-            ".job-list li a",
-            ".career-item .title",
         ]
+        # 20자 이상인 것만 추가
+        known_good_selectors = [s for s in known_good_selectors if len(s) >= 20]
         expanded_selectors.extend(known_good_selectors)
 
         selector_counts = df[df['selector'].notna() & (df['selector'] != '')]['selector'].value_counts()
-        sorted_selectors = selector_counts.index.tolist()
+        sorted_selectors = [s for s in selector_counts.index.tolist() if len(s) >= 20]
 
         final_selectors = sorted_selectors + [s for s in expanded_selectors if s not in sorted_selectors]
 
-        self.logger.info(f"수집된 선택자 {len(final_selectors)}개 (기존: {len(sorted_selectors)}개, 확장: {len(expanded_selectors)}개)")
+        self.logger.info(f"수집된 선택자 {len(final_selectors)}개 (20자 이상만, 기존: {len(sorted_selectors)}개, 확장: {len(expanded_selectors)}개)")
         return final_selectors
 
     def _is_specific_enough_selector(self, selector: str) -> bool:
@@ -252,9 +296,11 @@ class JobMonitoringDAG:
 
     def _try_existing_selectors(self, soup: BeautifulSoup, existing_selectors: List[str], _: str) -> Optional[str]:
         """기존 선택자들을 순서대로 시도해서 유효한 것을 찾습니다."""
-        for i, selector in enumerate(existing_selectors):
-            if not self._is_specific_enough_selector(selector):
-                continue
+        # 20자 이상의 선택자만 재활용 시도
+        valid_selectors = [s for s in existing_selectors if len(s) >= 20 and self._is_specific_enough_selector(s)]
+
+        for i, selector in enumerate(valid_selectors):
+            # 이미 필터링되었으므로 길이 체크 불필요
 
             try:
                 elements = soup.select(selector)
@@ -308,7 +354,7 @@ class JobMonitoringDAG:
 
         self.logger.info(f"{len(missing_selenium)}개 회사의 selenium_required 값을 병렬로 자동 설정 중...")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_index = {
                 executor.submit(self._determine_selenium_requirement, row['job_posting_url'], row['회사_한글_이름']): index
                 for index, row in missing_selenium.iterrows()
@@ -383,7 +429,7 @@ class JobMonitoringDAG:
         current_jobs = {}
         failed_companies = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             args_list = [(row, df_crawl) for _, row in df_crawl.iterrows()]
             results = executor.map(self._crawl_company, args_list)
 
@@ -397,13 +443,13 @@ class JobMonitoringDAG:
         self.logger.info("--- 3. 채용 공고 크롤링 종료 ---")
         return current_jobs, failed_companies
 
-    def compare_and_notify(self, current_jobs: Dict, failed_companies: List):
+    def compare_and_notify(self, current_jobs: Dict, failed_companies: List, chunk_info: str = None, save: bool = True):
         self.logger.info("--- 4. 비교 및 알림 시작 ---")
         existing_jobs = self.load_existing_jobs()
         new_jobs = self.find_new_jobs(current_jobs, existing_jobs)
         warnings = self.check_suspicious_results(current_jobs, existing_jobs, new_jobs)
-        self.send_slack_notification(new_jobs, warnings, failed_companies)
-        if current_jobs:
+        self.send_slack_notification(new_jobs, warnings, failed_companies, chunk_info=chunk_info)
+        if save and current_jobs:
             self.save_jobs(current_jobs)
         self.logger.info("--- 4. 비교 및 알림 종료 ---")
 
@@ -557,7 +603,7 @@ class JobMonitoringDAG:
         except Exception as e:
             self.logger.error(f"파일 저장 중 오류 발생: {e}")
 
-    def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List):
+    def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List, chunk_info: str = None):
         if not self.webhook_url:
             self.logger.error(f"{self.webhook_url_env}이 .env에 설정되지 않았습니다.")
             return
@@ -572,7 +618,8 @@ class JobMonitoringDAG:
 
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
-            header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!* ({current_time})\n"
+            chunk_str = f"({chunk_info}) " if chunk_info else ""
+            header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!* {chunk_str}({current_time})\n"
 
             current_message = header_msg
             for company, jobs in new_jobs.items():
