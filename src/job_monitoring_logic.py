@@ -34,8 +34,43 @@ class JobMonitoringDAG:
         self.webhook_url = os.getenv(webhook_url_env)
         self.company_urls = {}
         self.max_workers = int(os.getenv('MAX_WORKERS', '3'))
+        self.foreign_keywords = []  # 외국인 채용공고 키워드
 
+        # requests 세션 설정 (쿠키 및 연결 유지)
+        self.session = requests.Session()
+        self._setup_session()
         self._setup_logging()
+
+    def _setup_session(self):
+        """HTTP 세션 설정 (더 현실적인 브라우저 모방)"""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
+        }
+        self.session.headers.update(headers)
+
+        # HTTP 어댑터 설정 (연결 풀링, 재시도 등)
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
 
     def _setup_logging(self):
         self.logger = logging.getLogger(__name__)
@@ -60,6 +95,9 @@ class JobMonitoringDAG:
             return
 
         if self.worksheet_name == '5000대_기업':
+            # 외국인 채용공고 키워드 로드
+            self.foreign_keywords = self._load_foreign_keywords()
+
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
 
             chunk_size = 100
@@ -138,6 +176,40 @@ class JobMonitoringDAG:
             self.compare_and_notify(current_jobs, failed_companies)
 
         self.logger.info(f"✅ Job Monitoring DAG 종료 - {self.worksheet_name}")
+
+    def _load_foreign_keywords(self):
+        """외국인_공고_키워드 시트에서 키워드들을 로드합니다."""
+        try:
+            df_keywords = self.sheet_manager.get_all_records_as_df('외국인_공고_키워드')
+            if df_keywords.empty:
+                self.logger.info("외국인 키워드 시트가 비어있거나 찾을 수 없습니다.")
+                return []
+
+            keywords = []
+            # B열부터 모든 열의 값들을 수집
+            for col in df_keywords.columns[1:]:  # A열(인덱스) 제외
+                col_keywords = df_keywords[col].dropna().tolist()
+                keywords.extend([str(k).strip() for k in col_keywords if str(k).strip()])
+
+            # 중복 제거 및 빈 값 제거
+            keywords = list(set([k for k in keywords if k and k != 'nan']))
+            self.logger.info(f"외국인 채용 키워드 {len(keywords)}개 로드 완료: {keywords[:5]}..." if len(keywords) > 5 else f"외국인 채용 키워드 로드: {keywords}")
+            return keywords
+
+        except Exception as e:
+            self.logger.error(f"외국인 키워드 로드 실패: {e}")
+            return []
+
+    def _is_foreign_job_posting(self, job_title: str) -> bool:
+        """채용공고 제목에 외국인 키워드가 포함되는지 확인합니다."""
+        if not self.foreign_keywords:
+            return False
+
+        job_title_lower = job_title.lower()
+        for keyword in self.foreign_keywords:
+            if keyword.lower() in job_title_lower:
+                return True
+        return False
 
     def _process_company_complete(self, args):
         """선택자 찾기와 공고 수집을 한번에 처리"""
@@ -543,7 +615,8 @@ class JobMonitoringDAG:
         for attempt in range(max_retries):
             try:
                 if not use_selenium:
-                    response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+                    # 세션에 이미 헤더가 설정되어 있음
+                    response = self.session.get(url, timeout=20)
                     response.raise_for_status()
                     return response.text
                 else:
@@ -583,7 +656,22 @@ class JobMonitoringDAG:
         """실제 크롤링용 HTML 가져오기 메서드 (Playwright 사용)"""
         try:
             if not use_selenium:
-                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+                # 더 현실적인 브라우저 헤더 사용
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0'
+                }
+                response = requests.get(url, headers=headers, timeout=20)
                 response.raise_for_status()
                 return response.text
             else:
@@ -702,8 +790,14 @@ class JobMonitoringDAG:
 
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
+            # 외국인 채용공고 개수 계산
+            foreign_job_count = 0
+            for jobs in new_jobs.values():
+                foreign_job_count += sum(1 for job in jobs if self._is_foreign_job_posting(job))
+
             chunk_str = f"({chunk_info}) " if chunk_info else ""
-            header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!* {chunk_str}({current_time})\n"
+            foreign_info = f" (외국인 채용: {foreign_job_count}개 🌍)" if foreign_job_count > 0 else ""
+            header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})\n"
 
             current_message = header_msg
             for company, jobs in new_jobs.items():
@@ -712,7 +806,11 @@ class JobMonitoringDAG:
                 company_section = f"\n📢 *{linked_company}* - {len(jobs)}개\n"
 
                 for job in jobs:
-                    company_section += f"• {job}\n"
+                    # 외국인 채용공고인지 확인하고 굵은 글씨로 표시
+                    if self._is_foreign_job_posting(job):
+                        company_section += f"• *{job}* 🌍\n"  # 굵은 글씨 + 지구 이모지
+                    else:
+                        company_section += f"• {job}\n"
 
                 if len(current_message + company_section) > 3500:
                     messages_to_send.append(current_message.strip())
