@@ -211,6 +211,26 @@ class JobMonitoringDAG:
                 return True
         return False
 
+    def _highlight_foreign_keywords(self, job_title: str) -> tuple[str, bool]:
+        """채용공고 제목에서 외국인 키워드를 볼드처리하고, 외국인 공고인지 여부를 반환합니다."""
+        if not self.foreign_keywords:
+            return job_title, False
+
+        highlighted_title = job_title
+        is_foreign = False
+        job_title_lower = job_title.lower()
+
+        for keyword in self.foreign_keywords:
+            keyword_lower = keyword.lower()
+            if keyword_lower in job_title_lower:
+                is_foreign = True
+                # 대소문자 구분 없이 매칭된 부분을 볼드처리
+                import re
+                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                highlighted_title = pattern.sub(f'*{keyword}*', highlighted_title)
+
+        return highlighted_title, is_foreign
+
     def _process_company_complete(self, args):
         """선택자 찾기와 공고 수집을 한번에 처리"""
         index, row, existing_selectors = args
@@ -662,7 +682,7 @@ class JobMonitoringDAG:
             if not use_selenium:
                 # 더 현실적인 브라우저 헤더 사용
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
                     'Accept-Encoding': 'gzip, deflate, br',
@@ -673,10 +693,12 @@ class JobMonitoringDAG:
                     'Sec-Fetch-Mode': 'navigate',
                     'Sec-Fetch-Site': 'none',
                     'Sec-Fetch-User': '?1',
-                    'Cache-Control': 'max-age=0'
+                    'Cache-Control': 'max-age=0',
+                    'Referer': url  # 리퍼러 추가로 자연스러운 브라우징 시뮬레이션
                 }
-                response = requests.get(url, headers=headers, timeout=20)
+                response = requests.get(url, headers=headers, timeout=20, verify=False)
                 response.raise_for_status()
+                self.logger.debug(f"HTTP 요청 성공: {url} (응답 코드: {response.status_code})")
                 return response.text
             else:
                 playwright, browser = self.create_playwright_browser()
@@ -713,8 +735,20 @@ class JobMonitoringDAG:
                             playwright.stop()
                             raise e
 
+        except requests.exceptions.Timeout as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (타임아웃): {url} - {str(e)}")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (연결 오류): {url} - {str(e)}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (HTTP {e.response.status_code}): {url} - {str(e)}")
+            return None
+        except requests.exceptions.SSLError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (SSL 오류): {url} - {str(e)}")
+            return None
         except Exception as e:
-            self.logger.error(f"크롤링용 HTML 가져오기 실패: {url}, 오류: {e}")
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (기타 오류): {url} - {type(e).__name__}: {str(e)}")
             return None
 
     def create_playwright_browser(self):
@@ -728,7 +762,10 @@ class JobMonitoringDAG:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-web-security",
-                    "--disable-features=VizDisplayCompositor"
+                    "--disable-features=VizDisplayCompositor",
+                    "--ignore-certificate-errors",
+                    "--ignore-ssl-errors",
+                    "--ignore-certificate-errors-spki-list"
                 ]
             )
             self.logger.info("Playwright 브라우저 실행 성공")
@@ -800,7 +837,7 @@ class JobMonitoringDAG:
                 foreign_job_count += sum(1 for job in jobs if self._is_foreign_job_posting(job))
 
             chunk_str = f"({chunk_info}) " if chunk_info else ""
-            foreign_info = f" (외국인 채용: {foreign_job_count}개 🌍)" if foreign_job_count > 0 else ""
+            foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
             header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})\n"
 
             current_message = header_msg
@@ -810,9 +847,10 @@ class JobMonitoringDAG:
                 company_section = f"\n📢 *{linked_company}* - {len(jobs)}개\n"
 
                 for job in jobs:
-                    # 외국인 채용공고인지 확인하고 굵은 글씨로 표시
-                    if self._is_foreign_job_posting(job):
-                        company_section += f"• *{job}* 🌍\n"  # 굵은 글씨 + 지구 이모지
+                    # 외국인 키워드를 볼드처리하고 외국인 공고인지 확인
+                    highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
+                    if is_foreign:
+                        company_section += f"🔮 • {highlighted_job}\n"  # 수정구 이모지를 맨 앞으로
                     else:
                         company_section += f"• {job}\n"
 
