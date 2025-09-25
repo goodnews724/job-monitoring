@@ -418,22 +418,6 @@ ls -la key/credentials.json  # 파일 존재 확인
 # Google Cloud Console -> APIs & Services -> Quotas에서 확인
 ```
 
-#### 메모리 최적화
-```bash
-# 메모리 사용량 확인
-docker stats
-
-# 대용량 로그 정리
-find logs/ -name "*.log" -mtime +30 -delete
-find logs/ -size +100M -exec gzip {} \;
-```
-
-### 모니터링 지표
-- **DAG 성공률**: 95% 이상 유지
-- **평균 실행 시간**: 일반 30분, 5000대 기업 2시간 이내
-- **메모리 사용량**: 8GB 이하 권장
-- **새 공고 감지율**: 99% 이상 정확도
-
 ---
 
 **시스템 버전**: v2.5.0
