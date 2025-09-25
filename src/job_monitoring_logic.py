@@ -94,10 +94,13 @@ class JobMonitoringDAG:
             self.logger.error(f"Google Sheets에서 설정 정보를 가져오지 못했습니다: {self.worksheet_name}")
             return
 
-        if self.worksheet_name == '5000대_기업':
+        # 키워드 필터링이 필요한 시트 목록
+        keyword_sheets = ['5000대_기업', '[등록]채용홈페이지 모음']
+        if self.worksheet_name in keyword_sheets:
             # 외국인 채용공고 키워드 로드
             self.foreign_keywords = self._load_foreign_keywords()
 
+        if self.worksheet_name == '5000대_기업':
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
 
             chunk_size = 100
