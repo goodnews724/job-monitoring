@@ -137,8 +137,8 @@ class JobMonitoringDAG:
 
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
                 if i < num_chunks - 1:
-                    self.logger.info(f"다음 청크 처리를 위해 1분간 대기합니다.")
-                    time.sleep(60)
+                    self.logger.info(f"다음 청크 처리를 위해 2분간 대기합니다.")
+                    time.sleep(120)
 
             if all_current_jobs:
                 self.save_jobs(all_current_jobs)
