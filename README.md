@@ -1,22 +1,22 @@
 # Job Monitoring System (채용공고 자동 모니터링 시스템)
 
-## 📋 목차
-- [시스템 개요](#-시스템-개요)
-- [주요 기능](#-주요-기능)
-- [프로젝트 구조](#-프로젝트-구조)
-- [설치 및 설정](#-설치-및-설정)
-- [상세 기술 문서](#-상세-기술-문서)
-- [운영 가이드](#-운영-가이드)
-- [문제해결](#-문제해결)
-- [개발자 가이드](#-개발자-가이드)
+## 목차
+- [시스템 개요](#시스템-개요)
+- [주요 기능](#주요-기능)
+- [프로젝트 구조](#프로젝트-구조)
+- [설치 및 설정](#설치-및-설정)
+- [상세 기술 문서](#상세-기술-문서)
+- [운영 가이드](#운영-가이드)
+- [문제해결](#문제해결)
+- [개발자 가이드](#개발자-가이드)
 
-## 🎯 시스템 개요
+## 시스템 개요
 
 **Job Monitoring System**은 기업 채용홈페이지를 자동으로 모니터링하여 새로운 채용공고를 실시간으로 감지하고 Slack으로 알림을 보내는 자동화 시스템입니다.
 
 ### 핵심 특징
 - **지능형 크롤링**: 동적/정적 웹사이트 자동 구분하여 최적화된 방법으로 크롤링
-- **자동 선택자 감지**: AI 기반으로 채용공고 영역을 자동 식별
+- **자동 선택자 감지**: 패턴 분석 기반으로 채용공고 영역을 자동 식별
 - **실시간 알림**: 새로운 채용공고 발견 시 Slack으로 즉시 알림
 - **대용량 처리**: 5000대 기업 채용공고를 청크 단위로 안전하게 처리
 - **웹 기반 설정**: Google Sheets를 통한 편리한 설정 관리
@@ -25,7 +25,7 @@
 1. **일반 채용홈페이지**: 매일 10시, 15시 실행
 2. **5000대 기업**: 매일 19시 실행 (100개씩 청크 처리)
 
-## 🚀 주요 기능
+## 주요 기능
 
 ### 1. 자동 채용공고 감지
 - CSS 선택자 자동 생성 및 최적화
@@ -47,37 +47,37 @@
 - CSV 파일을 통한 채용공고 이력 관리
 - 실시간 데이터 동기화 및 백업
 
-## 📁 프로젝트 구조
+## 프로젝트 구조
 
 ```
 job-monitoring/
 ├── src/                              # 메인 소스코드
-│   ├── job_monitoring_logic.py       # 🎯 핵심 크롤링 로직 (979줄)
-│   ├── analyze_titles.py             # 🧠 채용공고 선택자 AI 분석기 (729줄)
-│   ├── google_sheet_utils.py         # 📊 Google Sheets 연동 (119줄)
-│   ├── utils.py                      # 🛠️ 유틸리티 함수들 (137줄)
-│   ├── job_monitoring_airflow_dag.py # ⏰ Airflow 스케줄링 (66줄)
-│   └── save_html.py                  # 💾 HTML 저장 유틸리티 (79줄)
+│   ├── job_monitoring_logic.py       # 핵심 크롤링 로직 (979줄)
+│   ├── analyze_titles.py             # 채용공고 선택자 패턴 분석기 (729줄)
+│   ├── google_sheet_utils.py         # Google Sheets 연동 (119줄)
+│   ├── utils.py                      # 유틸리티 함수들 (137줄)
+│   ├── job_monitoring_airflow_dag.py # Airflow 스케줄링 (66줄)
+│   └── save_html.py                  # HTML 저장 유틸리티 (79줄)
 ├── data/                             # 데이터 파일들
-│   ├── job_postings_latest.csv       # 📄 최신 채용공고 데이터
-│   ├── top_5000_postings_latest.csv  # 🏢 5000대 기업 채용공고
-│   └── 성과.txt                      # 📈 작업 성과 기록
+│   ├── job_postings_latest.csv       # 최신 채용공고 데이터
+│   ├── top_5000_postings_latest.csv  # 5000대 기업 채용공고
+│   └── 성과.txt                      # 작업 성과 기록
 ├── logs/                             # 로그 파일들
 │   ├── dag_id=job_monitoring_dag/
 │   ├── dag_id=top5000_company_monitoring_dag/
 │   └── scheduler/
 ├── key/                              # 인증 파일들
-│   └── credentials.json              # 🔑 Google API 인증 키
+│   └── credentials.json              # Google API 인증 키
 ├── scripts/                          # 배포 스크립트들
-│   ├── lambda_function.py            # ☁️ AWS Lambda 함수
-│   └── setup-aws-automation.sh       # 🚀 AWS 자동 설정
-├── docker-compose.yml                # 🐳 Docker 컨테이너 설정
-├── Dockerfile                        # 📦 Docker 이미지 빌드
-├── requirements.txt                  # 📋 Python 의존성
-└── .env                              # 🔧 환경 변수 설정
+│   ├── lambda_function.py            # AWS Lambda 함수
+│   └── setup-aws-automation.sh       # AWS 자동 설정
+├── docker-compose.yml                # Docker 컨테이너 설정
+├── Dockerfile                        # Docker 이미지 빌드
+├── requirements.txt                  # Python 의존성
+└── .env                              # 환경 변수 설정
 ```
 
-## 🛠️ 설치 및 설정
+## 설치 및 설정
 
 ### 1. 필수 요구사항
 
@@ -145,7 +145,7 @@ docker-compose logs -f webserver
 - 기본 계정: admin / admin
 - DAG 활성화: `job_monitoring_dag`, `top5000_company_monitoring_dag`
 
-## 📚 상세 기술 문서
+## 상세 기술 문서
 
 ### 핵심 클래스 및 함수 상세 설명
 
@@ -225,7 +225,7 @@ docker-compose logs -f webserver
 - 반환값: (최적_선택자, 신뢰도_점수)
 
 **`_is_potential_job_posting(text)`**
-- 텍스트가 채용공고인지 AI 기반 판단
+- 텍스트가 채용공고인지 패턴 기반 판단
 - 채용 관련 키워드 패턴 매칭
 - 블랙리스트 필터링 (네비게이션, 광고 등 제외)
 
@@ -316,7 +316,7 @@ docker-compose logs -f webserver
    └─ Google Sheets 동기화
 ```
 
-## 🔧 운영 가이드
+## 운영 가이드
 
 ### 일상 운영 작업
 
@@ -465,7 +465,7 @@ find logs/ -name "*.log" -size +100M -exec gzip {} \;
 - 시간 정보 포함 (월일(요일) 시분)
 - 확인 필요 공고 및 크롤링 실패 요약
 
-## 🚨 문제해결
+## 문제해결
 
 ### 자주 발생하는 문제들
 
@@ -606,7 +606,7 @@ find logs/ -size +1G -ls
 docker-compose restart scheduler webserver
 ```
 
-## 👨‍💻 개발자 가이드
+## 개발자 가이드
 
 ### 개발 환경 설정
 
@@ -746,21 +746,21 @@ class AirtableManager:
         pass
 ```
 
-#### 3. AI 기능 강화
+#### 3. 패턴 분석 기능 강화
 ```python
-# src/analyze_titles.py에 GPT API 연동
-def ai_enhanced_selector_generation(self, html_content):
-    # OpenAI GPT를 활용한 더 정확한 선택자 생성
+# src/analyze_titles.py에 고급 패턴 분석 추가
+def enhanced_pattern_analysis(self, html_content):
+    # 더 정교한 패턴 매칭을 통한 선택자 생성
     pass
 ```
 
 ---
 
-## 📞 지원 및 연락처
+## 지원 및 연락처
 
 이 시스템의 유지보수나 문제 해결이 필요한 경우:
 
-1. **즉시 해결이 필요한 경우**: 이 README의 [문제해결](#-문제해결) 섹션 참조
+1. **즉시 해결이 필요한 경우**: 이 README의 [문제해결](#문제해결) 섹션 참조
 2. **시스템 로그 확인**: `logs/` 디렉토리의 최신 로그 파일 분석
 3. **Google Sheets 접근**: 서비스 계정에 편집 권한이 있는지 확인
 4. **백업 복구**: `backup/` 디렉토리에서 최신 백업 활용
