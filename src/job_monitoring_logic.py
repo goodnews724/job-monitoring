@@ -883,6 +883,10 @@ class JobMonitoringDAG:
 
         kst = pytz.timezone('Asia/Seoul')
         current_time = datetime.now(kst).strftime('%H:%M')
+        current_datetime = datetime.now(kst)
+        # 요일 한글화
+        weekdays = ['월', '화', '수', '목', '금', '토', '일']
+        formatted_datetime = f"{current_datetime.month}월 {current_datetime.day}일 ({weekdays[current_datetime.weekday()]}) {current_datetime.strftime('%H:%M')}"
         
         blocks = []
 
@@ -905,6 +909,7 @@ class JobMonitoringDAG:
             for company, jobs in new_jobs.items():
                 company_url = self.company_urls.get(company, "")
                 linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
+                company_with_time = f"{linked_company} - {formatted_datetime}"
                 
                 job_lines = []
                 for job in jobs:
@@ -920,7 +925,7 @@ class JobMonitoringDAG:
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"📢 {linked_company} - {len(jobs)}개\n{job_text}"
+                        "text": f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
                     }
                 }
                 blocks.append(company_section)
