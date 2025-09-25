@@ -227,14 +227,29 @@ class JobMonitoringDAG:
             return job_title, False
 
         is_foreign = False
-        # 원본 job_title을 기준으로 모든 키워드 위치 찾기
+
+        # 1단계: 이미 *로 둘러싸인 부분 찾기 (이 부분은 보호)
+        markdown_ranges = []
+        for match in re.finditer(r'\*[^*]+\*', job_title):
+            markdown_ranges.append((match.start(), match.end()))
+
+        # 2단계: 키워드 찾기 (보호된 영역 제외)
         matches = []
         for keyword in self.foreign_keywords:
             try:
-                # 대소문자 구분 없이 모든 매칭 항목 찾기
                 for match in re.finditer(re.escape(keyword), job_title, re.IGNORECASE):
-                    matches.append((match.start(), match.end()))
-                    is_foreign = True
+                    start, end = match.start(), match.end()
+
+                    # 이미 마크다운으로 처리된 영역과 겹치는지 확인
+                    overlap = False
+                    for md_start, md_end in markdown_ranges:
+                        if not (end <= md_start or start >= md_end):
+                            overlap = True
+                            break
+
+                    if not overlap:
+                        matches.append((start, end))
+                        is_foreign = True
             except re.error as e:
                 self.logger.warning(f"정규식 오류: 키워드 '{keyword}' 처리 중 오류 발생 - {e}")
                 continue
@@ -242,22 +257,21 @@ class JobMonitoringDAG:
         if not is_foreign:
             return job_title, False
 
-        # 매칭된 위치들을 병합하여 중첩 제거
+        # 3단계: 매칭된 위치들을 병합하여 중첩 제거
         if not matches:
             return job_title, is_foreign
 
         matches.sort()
-
         merged = [matches[0]]
         for current_start, current_end in matches[1:]:
             last_start, last_end = merged[-1]
-            if current_start < last_end:
+            if current_start <= last_end:
                 # 중첩되거나 연속된 경우, 병합
                 merged[-1] = (last_start, max(last_end, current_end))
             else:
                 merged.append((current_start, current_end))
 
-        # 병합된 위치를 기반으로 볼드 처리된 새로운 문자열 생성
+        # 4단계: 볼드 처리된 새로운 문자열 생성
         highlighted_title = ""
         last_index = 0
         for start, end in merged:
@@ -605,7 +619,7 @@ class JobMonitoringDAG:
             return 1
 
     def _crawl_company(self, args):
-        row, df_crawl = args
+        row, _ = args
         company_name, url, use_selenium, selector = row['회사_한글_이름'], row['job_posting_url'], row['selenium_required'], row['selector']
         self.company_urls[company_name] = url
         self.logger.info(f"- {company_name} 크롤링 중...")
