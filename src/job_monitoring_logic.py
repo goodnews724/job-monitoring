@@ -830,77 +830,87 @@ class JobMonitoringDAG:
 
         kst = pytz.timezone('Asia/Seoul')
         current_time = datetime.now(kst).strftime('%H:%M')
-        messages_to_send = []
+        
+        blocks = []
 
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
-            # 외국인 채용공고 개수 계산
-            foreign_job_count = 0
-            for jobs in new_jobs.values():
-                foreign_job_count += sum(1 for job in jobs if self._is_foreign_job_posting(job))
+            foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job))
 
             chunk_str = f"({chunk_info}) " if chunk_info else ""
             foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
-            header_msg = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})\n"
+            header_text = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": header_text
+                }
+            })
+            blocks.append({"type": "divider"})
 
-            current_message = header_msg
             for company, jobs in new_jobs.items():
                 company_url = self.company_urls.get(company, "")
-                linked_company = f"<{company_url}|{company}>" if company_url else company
-                company_section = f"\n📢 *{linked_company}* - {len(jobs)}개\n"
-
+                linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
+                
+                job_lines = []
                 for job in jobs:
-                    # 외국인 키워드를 볼드처리하고 외국인 공고인지 확인
                     highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
+                    job_line = f"• {highlighted_job}"
                     if is_foreign:
-                        company_section += f"🔮 • {highlighted_job}\n"  # 수정구 이모지를 맨 앞으로
-                    else:
-                        company_section += f"• {job}\n"
-
-                if len(current_message + company_section) > 3500:
-                    messages_to_send.append(current_message.strip())
-                    current_message = company_section
-                else:
-                    current_message += company_section
-
-            if current_message.strip():
-                messages_to_send.append(current_message.strip())
+                        job_line = f"🔮 {job_line}"
+                    job_lines.append(job_line)
+                
+                job_text = "\n".join(job_lines)
+                
+                company_section = {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"📢 {linked_company} - {len(jobs)}개\n{job_text}"
+                    }
+                }
+                blocks.append(company_section)
 
         if warnings:
-            warning_msg = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)\n"
-            for warning in warnings:
-                warning_msg += f"• {warning}\n"
-            messages_to_send.append(warning_msg.strip())
+            warning_text = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)\n" + "\n".join([f"• {w}" for w in warnings])
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": warning_text
+                }
+            })
 
         if failed_companies:
-            fail_msg = "❌ *크롤링 실패*\n"
-            for fail in failed_companies:
-                fail_line = f"• {fail['company']}: {fail['reason']}\n"
-                if len(fail_msg + fail_line) > 3500:
-                    messages_to_send.append(fail_msg.strip())
-                    fail_msg = f"❌ *크롤링 실패 (계속)*\n{fail_line}"
-                else:
-                    fail_msg += fail_line
+            fail_text = "❌ *크롤링 실패*\n" + "\n".join([f"• {f['company']}: {f['reason']}" for f in failed_companies])
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": fail_text
+                }
+            })
 
-            if fail_msg.strip() != "❌ *크롤링 실패*":
-                messages_to_send.append(fail_msg.strip())
+        payload = {
+            "blocks": blocks,
+            "username": "채용공고 알리미",
+            "icon_emoji": ":robot_face:"
+        }
+        
+        try:
+            self.logger.info(f"📤 슬랙 메시지 전송 시도 (블록 개수: {len(blocks)})")
+            response = requests.post(self.webhook_url, json=payload, timeout=15)
 
-        for i, message in enumerate(messages_to_send):
-            payload = {"text": message, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-            try:
-                self.logger.info(f"📤 슬랙 메시지 전송 시도 ({i+1}/{len(messages_to_send)}) - 메시지 길이: {len(message)}자")
-                response = requests.post(self.webhook_url, json=payload, timeout=15)
+            if response.status_code == 200:
+                self.logger.info("✅ 슬랙 알림 전송 완료")
+            else:
+                self.logger.error(f"❌ 슬랙 응답 오류: {response.status_code} - {response.text}")
 
-                if response.status_code == 200:
-                    self.logger.info(f"✅ 슬랙 알림 전송 완료 ({i+1}/{len(messages_to_send)})")
-                else:
-                    self.logger.error(f"❌ 슬랙 응답 오류 ({i+1}/{len(messages_to_send)}): {response.status_code} - {response.text}")
-
-                import time
-                time.sleep(1)
-
-            except Exception as e:
-                self.logger.error(f"❌ 슬랙 알림 전송 오류 ({i+1}/{len(messages_to_send)}): {e}")
+        except Exception as e:
+            self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
