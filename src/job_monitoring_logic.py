@@ -21,13 +21,6 @@ class JobMonitoringDAG:
     def __init__(self, base_dir: str, worksheet_name: str = '[등록]채용홈페이지 모음', webhook_url_env: str = 'SLACK_WEBHOOK_URL', results_filename: str = 'job_postings_latest.csv'):
         self.base_dir = base_dir
         self.data_dir = os.path.join(base_dir, 'data')
-        self.html_dir = os.path.join(base_dir, 'html')
-        # HTML 디렉토리 생성 (더 안전한 방식)
-        try:
-            os.makedirs(self.html_dir, exist_ok=True)
-        except (FileExistsError, OSError):
-            # 이미 존재하거나 권한 문제가 있어도 계속 진행
-            pass
         self.worksheet_name = worksheet_name
         self.webhook_url_env = webhook_url_env  # 환경변수 이름 저장
         self.results_path = os.path.join(self.data_dir, results_filename)

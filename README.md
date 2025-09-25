@@ -56,8 +56,7 @@ job-monitoring/
 │   ├── analyze_titles.py             # 채용공고 선택자 패턴 분석기 (729줄)
 │   ├── google_sheet_utils.py         # Google Sheets 연동 (119줄)
 │   ├── utils.py                      # 유틸리티 함수들 (137줄)
-│   ├── job_monitoring_airflow_dag.py # Airflow 스케줄링 (66줄)
-│   └── save_html.py                  # HTML 저장 유틸리티 (79줄)
+│   └── job_monitoring_airflow_dag.py # Airflow 스케줄링 (66줄)
 ├── data/                             # 데이터 파일들
 │   ├── job_postings_latest.csv       # 최신 채용공고 데이터
 │   ├── top_5000_postings_latest.csv  # 5000대 기업 채용공고
@@ -71,6 +70,7 @@ job-monitoring/
 ├── scripts/                          # 배포 스크립트들
 │   ├── lambda_function.py            # AWS Lambda 함수
 │   └── setup-aws-automation.sh       # AWS 자동 설정
+├── archive_temp/                     # 임시 보관 파일들 (17개 디버그 스크립트)
 ├── docker-compose.yml                # Docker 컨테이너 설정
 ├── Dockerfile                        # Docker 이미지 빌드
 ├── requirements.txt                  # Python 의존성
