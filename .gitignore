@@ -216,4 +216,3 @@ __marimo__/
 !/key/.gitkeep
 
 /logs/
-test_debug_html.py
