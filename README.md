@@ -157,8 +157,7 @@ job-monitoring/
 │   └── utils.py                      # 유틸리티 함수들
 ├── data/                             # 데이터 저장소
 │   ├── job_postings_latest.csv       # 일반 모니터링 결과
-│   ├── top_5000_postings_latest.csv  # 5000대 기업 결과
-│   └── 성과.txt                      # 작업 성과 기록
+│   └── top_5000_postings_latest.csv  # 5000대 기업 결과
 ├── logs/                             # Airflow 실행 로그
 │   ├── dag_id=job_monitoring_dag/
 │   ├── dag_id=top5000_company_monitoring_dag/
