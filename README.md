@@ -59,8 +59,7 @@ job-monitoring/
 │   └── job_monitoring_airflow_dag.py # Airflow 스케줄링 (66줄)
 ├── data/                             # 데이터 파일들
 │   ├── job_postings_latest.csv       # 최신 채용공고 데이터
-│   ├── top_5000_postings_latest.csv  # 5000대 기업 채용공고
-│   └── 성과.txt                      # 작업 성과 기록
+│   └── top_5000_postings_latest.csv  # 5000대 기업 채용공고
 ├── logs/                             # 로그 파일들
 │   ├── dag_id=job_monitoring_dag/
 │   ├── dag_id=top5000_company_monitoring_dag/
