@@ -108,6 +108,8 @@ class JobMonitoringDAG:
             self.logger.info(f"'{self.worksheet_name}' 시트의 {len(df_to_process)}개 기업을 {num_chunks}개 청크로 분할하여 처리합니다.")
 
             all_current_jobs = {}
+            all_warnings = []
+            all_failed_companies = []
             list_of_df_chunks = [df_to_process.iloc[i:i+chunk_size] for i in range(0, len(df_to_process), chunk_size)]
 
             for i, df_chunk in enumerate(list_of_df_chunks):
@@ -133,12 +135,17 @@ class JobMonitoringDAG:
                 except Exception as e:
                     self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
 
-                self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False)
+                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
+                all_warnings.extend(warnings)
+                all_failed_companies.extend(failed_companies)
 
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
                 if i < num_chunks - 1:
                     self.logger.info(f"다음 청크 처리를 위해 2분간 대기합니다.")
                     time.sleep(120)
+
+            if all_warnings or all_failed_companies:
+                self.send_slack_notification({}, all_warnings, all_failed_companies, chunk_info="요약")
 
             if all_current_jobs:
                 self.save_jobs(all_current_jobs)
@@ -653,15 +660,20 @@ class JobMonitoringDAG:
         self.logger.info("--- 3. 채용 공고 크롤링 종료 ---")
         return current_jobs, failed_companies
 
-    def compare_and_notify(self, current_jobs: Dict, failed_companies: List, chunk_info: str = None, save: bool = True):
+    def compare_and_notify(self, current_jobs: Dict, failed_companies: List, chunk_info: str = None, save: bool = True, send_notifications: bool = True) -> Tuple[List, List]:
         self.logger.info("--- 4. 비교 및 알림 시작 ---")
         existing_jobs = self.load_existing_jobs()
         new_jobs = self.find_new_jobs(current_jobs, existing_jobs)
         warnings = self.check_suspicious_results(current_jobs, existing_jobs, new_jobs)
-        self.send_slack_notification(new_jobs, warnings, failed_companies, chunk_info=chunk_info)
+
+        # send_notifications가 True일 때만 새로운 공고 즉시 알림
+        if send_notifications and new_jobs:
+            self.send_slack_notification(new_jobs, [], [], chunk_info=chunk_info)
+
         if save and current_jobs:
             self.save_jobs(current_jobs)
         self.logger.info("--- 4. 비교 및 알림 종료 ---")
+        return warnings, failed_companies
 
     def get_html_content(self, url, use_selenium, selector=None):
         """선택자 분석용 HTML 가져오기 메서드 (Playwright 사용)"""
