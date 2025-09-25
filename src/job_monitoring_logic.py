@@ -219,18 +219,45 @@ class JobMonitoringDAG:
         if not self.foreign_keywords:
             return job_title, False
 
-        highlighted_title = job_title
         is_foreign = False
-        job_title_lower = job_title.lower()
-
+        # 원본 job_title을 기준으로 모든 키워드 위치 찾기
+        matches = []
         for keyword in self.foreign_keywords:
-            keyword_lower = keyword.lower()
-            if keyword_lower in job_title_lower:
-                is_foreign = True
-                # 대소문자 구분 없이 매칭된 부분을 볼드처리
-                import re
-                pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-                highlighted_title = pattern.sub(f'*{keyword}*', highlighted_title)
+            try:
+                # 대소문자 구분 없이 모든 매칭 항목 찾기
+                for match in re.finditer(re.escape(keyword), job_title, re.IGNORECASE):
+                    matches.append((match.start(), match.end()))
+                    is_foreign = True
+            except re.error as e:
+                self.logger.warning(f"정규식 오류: 키워드 '{keyword}' 처리 중 오류 발생 - {e}")
+                continue
+
+        if not is_foreign:
+            return job_title, False
+
+        # 매칭된 위치들을 병합하여 중첩 제거
+        if not matches:
+            return job_title, is_foreign
+
+        matches.sort()
+
+        merged = [matches[0]]
+        for current_start, current_end in matches[1:]:
+            last_start, last_end = merged[-1]
+            if current_start < last_end:
+                # 중첩되거나 연속된 경우, 병합
+                merged[-1] = (last_start, max(last_end, current_end))
+            else:
+                merged.append((current_start, current_end))
+
+        # 병합된 위치를 기반으로 볼드 처리된 새로운 문자열 생성
+        highlighted_title = ""
+        last_index = 0
+        for start, end in merged:
+            highlighted_title += job_title[last_index:start]
+            highlighted_title += f"*{job_title[start:end]}*"
+            last_index = end
+        highlighted_title += job_title[last_index:]
 
         return highlighted_title, is_foreign
 
