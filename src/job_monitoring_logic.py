@@ -129,7 +129,7 @@ class JobMonitoringDAG:
                 except Exception as e:
                     self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
 
-                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=True)
+                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
                 all_warnings.extend(warnings)
                 all_failed_companies.extend(failed_companies)
 
@@ -381,7 +381,8 @@ class JobMonitoringDAG:
                 # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
                 representative_idx = self._select_representative_company(companies_to_process, company_indices)
                 representative_row = companies_to_process.loc[representative_idx]
-                url_args.append((representative_idx, representative_row, existing_selectors, url))
+                is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
+                url_args.append((representative_idx, representative_row, existing_selectors, url, is_shared))
 
             # URL별 크롤링 실행
             results = executor.map(self._process_url_with_companies, url_args)
@@ -541,12 +542,13 @@ class JobMonitoringDAG:
 
     def _process_url_with_companies(self, args):
         """URL별로 크롤링을 수행합니다 (기존 _process_company_complete 기반)."""
-        index, row, existing_selectors, url = args
+        index, row, existing_selectors, url, is_shared = args
         company_name = row['회사_한글_이름']
         selector = row.get('selector', '')
         use_selenium = row['selenium_required']
 
-        self.logger.info(f"- {company_name} URL 처리 중... (공유 URL)")
+        url_type = "공유 URL" if is_shared else "개별 URL"
+        self.logger.info(f"- {company_name} URL 처리 중... ({url_type})")
         self.company_urls[company_name] = url
 
         html_content = self.get_html_content_for_crawling(url, use_selenium)
@@ -587,7 +589,8 @@ class JobMonitoringDAG:
             job_titles = [title for title in job_titles if len(title) > 2 and len(title) < 200]
             job_titles = list(set(job_titles))  # 중복 제거
 
-            self.logger.info(f"  - {company_name} 성공: {len(job_titles)}개 채용공고 수집 (URL 공유)")
+            url_type = "URL 공유" if is_shared else "개별 URL"
+            self.logger.info(f"  - {company_name} 성공: {len(job_titles)}개 채용공고 수집 ({url_type})")
             return url, selector, job_titles, None
 
         except Exception as e:
