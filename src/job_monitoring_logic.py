@@ -361,27 +361,70 @@ class JobMonitoringDAG:
         existing_selectors = self._get_existing_selectors(df)
         self.logger.info(f"기존 선택자 {len(existing_selectors)}개 (20자 이상만) 활용")
 
-        # 4. 통합 처리 (선택자 찾기 + 크롤링)
+        # 4. 중복 URL 그룹화 및 최적화
+        url_groups = self._group_companies_by_url(companies_to_process)
+
+        if len(url_groups) < len(companies_to_process):
+            duplicate_savings = len(companies_to_process) - len(url_groups)
+            self.logger.info(f"중복 URL 최적화: {len(companies_to_process)}개 회사 → {len(url_groups)}개 URL로 그룹화 (크롤링 {duplicate_savings}회 절약)")
+
+        # 5. URL별 통합 처리 (선택자 찾기 + 크롤링)
         current_jobs = {}
         failed_companies = []
+        url_results_cache = {}  # URL별 크롤링 결과 캐시
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            args_list = [(index, row, existing_selectors) for index, row in companies_to_process.iterrows()]
-            results = executor.map(self._process_company_complete, args_list)
+            # URL별로 대표 회사를 선택하여 처리
+            url_args = []
+            for url, company_indices in url_groups.items():
+                # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
+                representative_idx = self._select_representative_company(companies_to_process, company_indices)
+                representative_row = companies_to_process.loc[representative_idx]
+                url_args.append((representative_idx, representative_row, existing_selectors, url))
 
-            for index, selector, job_titles, error_info in results:
-                if selector:
-                    df.loc[index, 'selector'] = selector
+            # URL별 크롤링 실행
+            results = executor.map(self._process_url_with_companies, url_args)
 
-                if job_titles:
-                    company_name = companies_to_process.loc[index, '회사_한글_이름']
-                    current_jobs[company_name] = job_titles
-                elif error_info:
-                    # 실패 유형별로 selenium_required 값 설정
+            for url, result_selector, job_titles, error_info in results:
+                url_results_cache[url] = {
+                    'selector': result_selector,
+                    'job_titles': job_titles,
+                    'error_info': error_info
+                }
+
+        # 6. 결과를 모든 관련 회사에 적용
+        for url, company_indices in url_groups.items():
+            cached_result = url_results_cache[url]
+
+            if cached_result['error_info']:
+                # 실패한 경우 모든 관련 회사에 동일한 오류 적용
+                for idx in company_indices:
+                    company_name = companies_to_process.loc[idx, '회사_한글_이름']
+                    error_info = cached_result['error_info'].copy()
+                    error_info['company'] = company_name
+
                     if 'selenium_status' in error_info:
-                        df.loc[index, 'selenium_required'] = error_info['selenium_status']
-                        self.logger.info(f"  - {error_info['company']} selenium_required를 {error_info['selenium_status']}로 설정")
+                        df.loc[idx, 'selenium_required'] = error_info['selenium_status']
+
                     failed_companies.append(error_info)
+
+                if len(company_indices) > 1:
+                    self.logger.info(f"  - URL {url[:50]}... 실패 → {len(company_indices)}개 회사에 동일 오류 적용")
+            else:
+                # 성공한 경우 모든 관련 회사에 동일한 결과 적용
+                for idx in company_indices:
+                    company_name = companies_to_process.loc[idx, '회사_한글_이름']
+
+                    # 선택자 업데이트
+                    if cached_result['selector']:
+                        df.loc[idx, 'selector'] = cached_result['selector']
+
+                    # 채용공고 결과 적용
+                    current_jobs[company_name] = cached_result['job_titles']
+                    self.company_urls[company_name] = url
+
+                if len(company_indices) > 1:
+                    self.logger.info(f"  - URL {url[:50]}... 성공 → {len(company_indices)}개 회사에 동일 결과 적용 ({len(cached_result['job_titles'])}개 공고)")
 
         # 5. 선택자 안정화
         df = self.stabilize_selectors(df)
@@ -456,6 +499,96 @@ class JobMonitoringDAG:
             self.logger.info("안정화할 선택자가 없습니다.")
         return df
 
+    def _group_companies_by_url(self, df: pd.DataFrame) -> Dict[str, List[int]]:
+        """URL별로 회사들을 그룹화합니다."""
+        url_groups = {}
+        for idx, row in df.iterrows():
+            url = row['job_posting_url'].strip()
+            if url not in url_groups:
+                url_groups[url] = []
+            url_groups[url].append(idx)
+        return url_groups
+
+    def _select_representative_company(self, df: pd.DataFrame, company_indices: List[int]) -> int:
+        """URL 그룹에서 가장 적합한 대표 회사를 선택합니다."""
+        if len(company_indices) == 1:
+            return company_indices[0]
+
+        # 선택자가 있는 회사 우선
+        for idx in company_indices:
+            row = df.loc[idx]
+            if pd.notna(row.get('selector', '')) and row.get('selector', '').strip():
+                return idx
+
+        # original_selector가 있는 회사 우선
+        for idx in company_indices:
+            row = df.loc[idx]
+            if pd.notna(row.get('original_selector', '')) and row.get('original_selector', '').strip():
+                return idx
+
+        # selenium_required가 0 또는 1인 회사 우선 (실패 상태 아닌)
+        for idx in company_indices:
+            row = df.loc[idx]
+            if row.get('selenium_required', 0) in [0, 1]:
+                return idx
+
+        # 그 외의 경우 첫 번째 회사 선택
+        return company_indices[0]
+
+    def _process_url_with_companies(self, args):
+        """URL별로 크롤링을 수행합니다 (기존 _process_company_complete 기반)."""
+        index, row, existing_selectors, url = args
+        company_name = row['회사_한글_이름']
+        selector = row.get('selector', '')
+        use_selenium = row['selenium_required']
+
+        self.logger.info(f"- {company_name} URL 처리 중... (공유 URL)")
+        self.company_urls[company_name] = url
+
+        html_content = self.get_html_content_for_crawling(url, use_selenium)
+
+        if not html_content:
+            self.logger.error(f"  - HTML 가져오기 실패: {company_name} (selenium_required를 -1로 설정)")
+            return url, None, [], {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url, 'selenium_status': -1}
+
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # 선택자가 없거나 빈 경우 새로 찾기
+            if not selector or selector.strip() == '':
+                self.logger.info(f"  - {company_name} 선택자 찾기 중...")
+                found_selector = self._try_existing_selectors(soup, existing_selectors, company_name)
+
+                if found_selector:
+                    selector = found_selector
+                    self.logger.info(f"  - 기존 선택자 적용 성공: {selector}")
+                else:
+                    best_selector, _ = self.selector_analyzer.find_best_selector(soup)
+                    if best_selector:
+                        selector = best_selector
+                        self.logger.info(f"  - 새 선택자 찾기 성공: {selector}")
+                    else:
+                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패 (selenium_required를 -2로 설정)")
+                        return url, None, [], {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url, 'selenium_status': -2}
+            else:
+                self.logger.info(f"  - 기존 선택자 사용: {selector}")
+
+            # 채용공고 수집
+            postings = soup.select(selector)
+            if not postings:
+                self.logger.warning(f"  - {company_name} 선택자로 요소를 찾을 수 없음: {selector}")
+                return url, selector, [], None
+
+            job_titles = [elem.get_text(strip=True) for elem in postings if elem.get_text(strip=True)]
+            job_titles = [title for title in job_titles if len(title) > 2 and len(title) < 200]
+            job_titles = list(set(job_titles))  # 중복 제거
+
+            self.logger.info(f"  - {company_name} 성공: {len(job_titles)}개 채용공고 수집 (URL 공유)")
+            return url, selector, job_titles, None
+
+        except Exception as e:
+            self.logger.error(f"  - {company_name} 처리 중 오류: {e}")
+            return url, None, [], {'company': company_name, 'reason': f'처리 오류: {str(e)}', 'url': url, 'selenium_status': None}
 
     def _get_existing_selectors(self, df: pd.DataFrame) -> List[str]:
         """기존에 성공적으로 사용된 선택자들을 수집합니다 (20자 이상만)."""
