@@ -989,7 +989,7 @@ class JobMonitoringDAG:
             return {}
 
     def find_new_jobs(self, current_jobs: Dict, existing_jobs: Dict) -> Dict[str, List[str]]:
-        new_jobs = {comp: list(curr - existing_jobs.get(comp, set())) for comp, curr in current_jobs.items()}
+        new_jobs = {comp: list(set(curr) - existing_jobs.get(comp, set())) for comp, curr in current_jobs.items()}
         return {c: j for c, j in new_jobs.items() if j}
 
     def check_suspicious_results(self, current_jobs: Dict, existing_jobs: Dict, new_jobs: Dict) -> List[str]:
