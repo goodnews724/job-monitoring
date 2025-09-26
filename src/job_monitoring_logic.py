@@ -128,7 +128,7 @@ class JobMonitoringDAG:
                 except Exception as e:
                     self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
 
-                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
+                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=True)
                 all_warnings.extend(warnings)
                 all_failed_companies.extend(failed_companies)
 
@@ -877,11 +877,19 @@ class JobMonitoringDAG:
         kst = pytz.timezone('Asia/Seoul')
         current_time = datetime.now(kst).strftime('%H:%M')
         current_datetime = datetime.now(kst)
-        # 요일 한글화
         weekdays = ['월', '화', '수', '목', '금', '토', '일']
         formatted_datetime = f"{current_datetime.month}월 {current_datetime.day}일 ({weekdays[current_datetime.weekday()]}) {current_datetime.strftime('%H:%M')}"
-        
-        blocks = []
+
+        def send_payload(payload):
+            try:
+                self.logger.info(f"📤 슬랙 메시지 전송 시도 (블록 개수: {len(payload.get('blocks', []))})")
+                response = requests.post(self.webhook_url, json=payload, timeout=15)
+                if response.status_code == 200:
+                    self.logger.info("✅ 슬랙 알림 전송 완료")
+                else:
+                    self.logger.error(f"❌ 슬랙 응답 오류: {response.status_code} - {response.text}")
+            except Exception as e:
+                self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
 
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
@@ -890,20 +898,20 @@ class JobMonitoringDAG:
             chunk_str = f"({chunk_info}) " if chunk_info else ""
             foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
             header_text = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": header_text
-                }
-            })
-            blocks.append({"type": "divider"})
+
+            # 메시지 분할을 위한 변수
+            current_blocks = []
+            current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
+            current_blocks.append({"type": "divider"})
+
+            # 헤더와 구분선의 대략적인 문자 수
+            current_length = len(header_text) + 50  # 여유분 포함
 
             for company, jobs in new_jobs.items():
                 company_url = self.company_urls.get(company, "")
                 linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
                 company_with_time = f"{linked_company} - {formatted_datetime}"
-                
+
                 job_lines = []
                 for job in jobs:
                     highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
@@ -911,57 +919,86 @@ class JobMonitoringDAG:
                     if is_foreign:
                         job_line = f"🔮 {job_line}"
                     job_lines.append(job_line)
-                
+
                 job_text = "\n".join(job_lines)
-                
+                company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
+
+                # 현재 섹션을 추가했을 때의 예상 길이
+                estimated_length = current_length + len(company_section_text) + 100  # 마크업 여유분
+
+                # 2800자 초과시 현재 블록들을 먼저 전송
+                if estimated_length > CHAR_LIMIT:
+                    payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                    send_payload(payload)
+
+                    # 새 블록 시작 (계속 표시)
+                    current_blocks = []
+                    continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
+                    current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
+                    current_blocks.append({"type": "divider"})
+                    current_length = len(continuation_header) + 50
+
                 company_section = {
                     "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
-                    }
+                    "text": {"type": "mrkdwn", "text": company_section_text}
                 }
-                blocks.append(company_section)
+                current_blocks.append(company_section)
+                current_length += len(company_section_text) + 100
 
+            # 마지막 블록들 전송
+            if current_blocks:
+                payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                send_payload(payload)
+
+        CHAR_LIMIT = 2800
+        
         if warnings:
-            warning_text = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)\n" + "\n".join([f"• {w}" for w in warnings])
-            blocks.append({"type": "divider"})
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": warning_text
-                }
-            })
+            warning_header = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)"
+            current_text = ""
+            
+            for w in warnings:
+                line = f"• {w}"
+                if len(current_text) + len(line) > CHAR_LIMIT:
+                    blocks = [
+                        {"type": "divider"},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": f"{warning_header}\n{current_text}"}}
+                    ]
+                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                    send_payload(payload)
+                    current_text = ""
+                current_text += f"\n{line}"
+
+            if current_text:
+                blocks = [
+                    {"type": "divider"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{warning_header}\n{current_text}"}}
+                ]
+                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                send_payload(payload)
 
         if failed_companies:
-            fail_text = "❌ *크롤링 실패*\n" + "\n".join([f"• {f['company']}: {f['reason']}" for f in failed_companies])
-            blocks.append({"type": "divider"})
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": fail_text
-                }
-            })
+            fail_header = "❌ *크롤링 실패*"
+            current_text = ""
 
-        payload = {
-            "blocks": blocks,
-            "username": "채용공고 알리미",
-            "icon_emoji": ":robot_face:"
-        }
-        
-        try:
-            self.logger.info(f"📤 슬랙 메시지 전송 시도 (블록 개수: {len(blocks)})")
-            response = requests.post(self.webhook_url, json=payload, timeout=15)
+            for f in failed_companies:
+                line = f"• {f['company']}: {f['reason']}"
+                if len(current_text) + len(line) > CHAR_LIMIT:
+                    blocks = [
+                        {"type": "divider"},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": f"{fail_header}\n{current_text}"}}
+                    ]
+                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                    send_payload(payload)
+                    current_text = ""
+                current_text += f"\n{line}"
 
-            if response.status_code == 200:
-                self.logger.info("✅ 슬랙 알림 전송 완료")
-            else:
-                self.logger.error(f"❌ 슬랙 응답 오류: {response.status_code} - {response.text}")
-
-        except Exception as e:
-            self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
+            if current_text:
+                blocks = [
+                    {"type": "divider"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{fail_header}\n{current_text}"}}
+                ]
+                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                send_payload(payload)
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
