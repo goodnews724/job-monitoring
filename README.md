@@ -31,30 +31,156 @@
 
 ## 시스템 아키텍처
 
+### 전체 시스템 구조
 ```mermaid
 graph TB
-    A[Airflow Scheduler] --> B{DAG 선택}
-    B --> C[일반 모니터링 DAG<br/>10시, 15시]
-    B --> D[5000대 기업 DAG<br/>19시]
+    subgraph "🐳 Docker Container"
+        A[Airflow Scheduler<br/>cron 기반 스케줄링]
+        B[Airflow Webserver<br/>웹 UI 관리]
+        C[Airflow Worker<br/>작업 실행]
+    end
 
-    C --> E[JobMonitoringDAG]
-    D --> E
+    subgraph "📊 External Services"
+        D[Google Sheets API<br/>회사 정보 & 설정]
+        E[Slack Webhook<br/>알림 전송]
+    end
 
-    E --> F[Google Sheets<br/>회사 목록 로드]
-    F --> G[전처리 & 크롤링 통합]
-    G --> H{처리 방식}
+    subgraph "🏢 Target Websites"
+        F[일반 기업 채용사이트<br/>정적/동적 웹사이트]
+        G[5000대 기업 채용사이트<br/>대용량 처리 대상]
+    end
 
-    H --> I[일반: 전체 처리]
-    H --> J[5000대: 청크 처리<br/>100개씩]
+    subgraph "💾 Data Storage"
+        H[CSV Files<br/>크롤링 결과 저장]
+        I[Log Files<br/>실행 로그 & 디버깅]
+    end
 
-    I --> K[비교 & 알림]
-    J --> L[청크별 처리]
-    L --> M[전체 요약 알림]
+    A --> |스케줄 트리거| C
+    C --> |회사 정보 로드| D
+    C --> |채용공고 크롤링| F
+    C --> |채용공고 크롤링| G
+    C --> |결과 알림| E
+    C --> |결과 저장| H
+    C --> |로그 기록| I
+    C --> |설정 업데이트| D
+    B --> |모니터링| A
+```
 
-    K --> N[Slack 알림]
-    M --> N
-    N --> O[결과 저장]
-    O --> P[Google Sheets 동기화]
+### 상세 처리 흐름
+```mermaid
+graph TD
+    subgraph "🕐 Schedule Triggers"
+        S1[일반 DAG<br/>10시, 15시]
+        S2[5000대 DAG<br/>19시]
+    end
+
+    subgraph "⚙️ Core Processing"
+        P1[JobMonitoringDAG<br/>메인 처리 로직]
+        P2[Google Sheets<br/>데이터 로드]
+        P3[Selenium 필요성<br/>자동 판단]
+        P4[HTML 수집<br/>Playwright/Requests]
+        P5[CSS 선택자<br/>자동 생성/재활용]
+        P6[채용공고 추출<br/>& 검증]
+        P7[외국인 키워드<br/>매칭 & 하이라이트]
+    end
+
+    subgraph "📊 Processing Modes"
+        M1[일반 모드<br/>전체 일괄 처리]
+        M2[청크 모드<br/>100개씩 분할]
+    end
+
+    subgraph "🔍 Result Analysis"
+        R1[이전 결과 비교<br/>새 공고 감지]
+        R2[의심 변경 감지<br/>급격한 증감 체크]
+        R3[결과 분류<br/>성공/경고/실패]
+    end
+
+    subgraph "📱 Notification System"
+        N1[즉시 알림<br/>새 공고 발견시]
+        N2[요약 알림<br/>경고/실패 통합]
+        N3[메시지 분할<br/>4000자 제한 처리]
+    end
+
+    subgraph "💾 Data Management"
+        D1[CSV 저장<br/>로컬 파일]
+        D2[Sheets 동기화<br/>설정 업데이트]
+        D3[로그 관리<br/>디버깅 정보]
+    end
+
+    S1 --> P1
+    S2 --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    P4 --> P5
+    P5 --> P6
+    P6 --> P7
+
+    P7 --> M1
+    P7 --> M2
+
+    M1 --> R1
+    M2 --> R1
+    R1 --> R2
+    R2 --> R3
+
+    R3 --> N1
+    R3 --> N2
+    N1 --> N3
+    N2 --> N3
+
+    N3 --> D1
+    D1 --> D2
+    D2 --> D3
+
+    style S1 fill:#e1f5fe
+    style S2 fill:#e1f5fe
+    style P1 fill:#f3e5f5
+    style M1 fill:#fff3e0
+    style M2 fill:#fff3e0
+    style N1 fill:#e8f5e8
+    style N2 fill:#e8f5e8
+```
+
+### 기술 스택 & 의존성
+```mermaid
+graph LR
+    subgraph "🐍 Python Ecosystem"
+        PY[Python 3.8+]
+        AF[Apache Airflow<br/>워크플로우 관리]
+        PW[Playwright<br/>브라우저 자동화]
+        BS[BeautifulSoup<br/>HTML 파싱]
+        PD[Pandas<br/>데이터 처리]
+        RQ[Requests<br/>HTTP 클라이언트]
+    end
+
+    subgraph "🌐 External APIs"
+        GS[Google Sheets API<br/>데이터 소스]
+        SL[Slack Webhook<br/>알림 채널]
+    end
+
+    subgraph "🐳 Infrastructure"
+        DC[Docker Compose<br/>컨테이너 관리]
+        CR[Chromium Browser<br/>Playwright 엔진]
+        FS[File System<br/>로그 & 데이터]
+    end
+
+    PY --> AF
+    AF --> PW
+    AF --> BS
+    AF --> PD
+    AF --> RQ
+
+    AF --> GS
+    AF --> SL
+
+    DC --> AF
+    PW --> CR
+    AF --> FS
+
+    style PY fill:#ffd54f
+    style AF fill:#ff8a65
+    style DC fill:#4fc3f7
 ```
 
 ## 동작 흐름도
