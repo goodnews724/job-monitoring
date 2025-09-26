@@ -891,6 +891,8 @@ class JobMonitoringDAG:
             except Exception as e:
                 self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
 
+        CHAR_LIMIT = 2800
+
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
             foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job))
@@ -950,8 +952,6 @@ class JobMonitoringDAG:
                 payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
                 send_payload(payload)
 
-        CHAR_LIMIT = 2800
-        
         if warnings:
             warning_header = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)"
             current_text = ""
