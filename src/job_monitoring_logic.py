@@ -28,6 +28,7 @@ class JobMonitoringDAG:
         self.company_urls = {}
         self.max_workers = int(os.getenv('MAX_WORKERS', '3'))
         self.foreign_keywords = []  # 외국인 채용공고 키워드
+        self.url_groups_for_notification = {}  # URL 그룹 정보 (슬랙 알림용)
 
         # requests 세션 설정 (쿠키 및 연결 유지)
         self.session = requests.Session()
@@ -419,14 +420,17 @@ class JobMonitoringDAG:
                     if cached_result['selector']:
                         df.loc[idx, 'selector'] = cached_result['selector']
 
-                    # 채용공고 결과 적용
+                    # 채용공고 결과 적용 (URL 그룹 정보도 함께 저장)
                     current_jobs[company_name] = cached_result['job_titles']
                     self.company_urls[company_name] = url
 
                 if len(company_indices) > 1:
                     self.logger.info(f"  - URL {url[:50]}... 성공 → {len(company_indices)}개 회사에 동일 결과 적용 ({len(cached_result['job_titles'])}개 공고)")
 
-        # 5. 선택자 안정화
+        # 7. URL 그룹 정보 저장 (슬랙 알림용)
+        self.url_groups_for_notification = self._prepare_url_groups_for_notification(url_groups, companies_to_process, current_jobs)
+
+        # 8. 선택자 안정화
         df = self.stabilize_selectors(df)
 
         self.logger.info(f"통합 처리 완료: 성공 {len(current_jobs)}개, 실패 {len(failed_companies)}개")
@@ -589,6 +593,24 @@ class JobMonitoringDAG:
         except Exception as e:
             self.logger.error(f"  - {company_name} 처리 중 오류: {e}")
             return url, None, [], {'company': company_name, 'reason': f'처리 오류: {str(e)}', 'url': url, 'selenium_status': None}
+
+    def _prepare_url_groups_for_notification(self, url_groups: Dict[str, List[int]], companies_df: pd.DataFrame, current_jobs: Dict) -> Dict[str, List[str]]:
+        """슬랙 알림용 URL 그룹 정보를 준비합니다."""
+        notification_groups = {}
+
+        for url, company_indices in url_groups.items():
+            if len(company_indices) > 1:  # 중복 URL만 처리
+                company_names = []
+                for idx in company_indices:
+                    company_name = companies_df.loc[idx, '회사_한글_이름']
+                    # 실제로 채용공고를 가져온 회사만 포함
+                    if company_name in current_jobs:
+                        company_names.append(company_name)
+
+                if len(company_names) > 1:  # 성공한 회사가 2개 이상일 때만 그룹화
+                    notification_groups[url] = company_names
+
+        return notification_groups
 
     def _get_existing_selectors(self, df: pd.DataFrame) -> List[str]:
         """기존에 성공적으로 사용된 선택자들을 수집합니다 (20자 이상만)."""
@@ -1042,43 +1064,102 @@ class JobMonitoringDAG:
             # 헤더와 구분선의 대략적인 문자 수
             current_length = len(header_text) + 50  # 여유분 포함
 
+            # URL 그룹 정보를 활용한 스마트 알림
+            url_groups = getattr(self, 'url_groups_for_notification', {})
+            processed_companies = set()
+
+            # 1. 먼저 URL 그룹화된 회사들 처리
+            for url, grouped_companies in url_groups.items():
+                if len(grouped_companies) > 1:
+                    # 모든 그룹 회사에서 채용공고가 있는지 확인
+                    group_has_jobs = all(company in new_jobs for company in grouped_companies)
+
+                    if group_has_jobs:
+                        # 첫 번째 회사의 채용공고를 사용 (모두 동일하므로)
+                        representative_company = grouped_companies[0]
+                        jobs = new_jobs[representative_company]
+
+                        # 그룹 회사명 표시
+                        company_names = " / ".join(grouped_companies)
+                        linked_company = f"<{url}|{company_names}>"
+                        company_with_time = f"{linked_company} - {formatted_datetime}"
+
+                        job_lines = []
+                        for job in jobs:
+                            highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
+                            job_line = f"• {highlighted_job}"
+                            if is_foreign:
+                                job_line = f"🔮 {job_line}"
+                            job_lines.append(job_line)
+
+                        job_text = "\n".join(job_lines)
+                        group_info = f"🔗 *{len(grouped_companies)}개 회사 공유 URL*"
+                        company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{group_info}\n{job_text}"
+
+                        # 현재 섹션을 추가했을 때의 예상 길이
+                        estimated_length = current_length + len(company_section_text) + 100
+
+                        # 2800자 초과시 현재 블록들을 먼저 전송
+                        if estimated_length > CHAR_LIMIT:
+                            payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                            send_payload(payload)
+
+                            # 새 블록 시작 (계속 표시)
+                            current_blocks = []
+                            continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
+                            current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
+                            current_blocks.append({"type": "divider"})
+                            current_length = len(continuation_header) + 50
+
+                        company_section = {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": company_section_text}
+                        }
+                        current_blocks.append(company_section)
+                        current_length += len(company_section_text) + 100
+
+                        # 처리된 회사들 마킹
+                        processed_companies.update(grouped_companies)
+
+            # 2. 개별 회사들 처리 (그룹화되지 않은 회사들)
             for company, jobs in new_jobs.items():
-                company_url = self.company_urls.get(company, "")
-                linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
-                company_with_time = f"{linked_company} - {formatted_datetime}"
+                if company not in processed_companies:
+                    company_url = self.company_urls.get(company, "")
+                    linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
+                    company_with_time = f"{linked_company} - {formatted_datetime}"
 
-                job_lines = []
-                for job in jobs:
-                    highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
-                    job_line = f"• {highlighted_job}"
-                    if is_foreign:
-                        job_line = f"🔮 {job_line}"
-                    job_lines.append(job_line)
+                    job_lines = []
+                    for job in jobs:
+                        highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
+                        job_line = f"• {highlighted_job}"
+                        if is_foreign:
+                            job_line = f"🔮 {job_line}"
+                        job_lines.append(job_line)
 
-                job_text = "\n".join(job_lines)
-                company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
+                    job_text = "\n".join(job_lines)
+                    company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
 
-                # 현재 섹션을 추가했을 때의 예상 길이
-                estimated_length = current_length + len(company_section_text) + 100  # 마크업 여유분
+                    # 현재 섹션을 추가했을 때의 예상 길이
+                    estimated_length = current_length + len(company_section_text) + 100
 
-                # 2800자 초과시 현재 블록들을 먼저 전송
-                if estimated_length > CHAR_LIMIT:
-                    payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                    send_payload(payload)
+                    # 2800자 초과시 현재 블록들을 먼저 전송
+                    if estimated_length > CHAR_LIMIT:
+                        payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                        send_payload(payload)
 
-                    # 새 블록 시작 (계속 표시)
-                    current_blocks = []
-                    continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
-                    current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
-                    current_blocks.append({"type": "divider"})
-                    current_length = len(continuation_header) + 50
+                        # 새 블록 시작 (계속 표시)
+                        current_blocks = []
+                        continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
+                        current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
+                        current_blocks.append({"type": "divider"})
+                        current_length = len(continuation_header) + 50
 
-                company_section = {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": company_section_text}
-                }
-                current_blocks.append(company_section)
-                current_length += len(company_section_text) + 100
+                    company_section = {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": company_section_text}
+                    }
+                    current_blocks.append(company_section)
+                    current_length += len(company_section_text) + 100
 
             # 마지막 블록들 전송
             if current_blocks:
