@@ -891,114 +891,84 @@ class JobMonitoringDAG:
             except Exception as e:
                 self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
 
-        CHAR_LIMIT = 2800
+        def paginate_and_send(header_template: str, content_pieces: List[str]):
+            if not content_pieces:
+                return
 
+            CHAR_LIMIT = 2800
+            pages = []
+            current_page_text = ""
+            for piece in content_pieces:
+                separator = "\n\n" if current_page_text else ""
+                if len(current_page_text) + len(separator) + len(piece) > CHAR_LIMIT:
+                    if current_page_text:
+                        pages.append(current_page_text)
+                    current_page_text = piece.lstrip()
+                else:
+                    current_page_text += separator + piece
+            if current_page_text:
+                pages.append(current_page_text)
+
+            for i, page_text in enumerate(pages):
+                header = header_template
+                if len(pages) > 1:
+                    header += f" ({i+1}/{len(pages)})"
+
+                blocks = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+                    {"type": "divider"},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": page_text}}
+                ]
+                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                send_payload(payload)
+
+        # --- 1. 새로운 공고 전송 ---
         if new_jobs:
             total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
             foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job))
-
             chunk_str = f"({chunk_info}) " if chunk_info else ""
-            foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
-            header_text = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
+            foreign_info = f" (외국인 채용: {foreign_job_count}개 :수정구:)" if foreign_job_count > 0 else ""
+            header = f":짠: *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
+            
+            job_pieces = []
+            processed_companies = set()
+            url_groups = getattr(self, 'url_groups_for_notification', {})
 
-            # 메시지 분할을 위한 변수
-            current_blocks = []
-            current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
-            current_blocks.append({"type": "divider"})
-
-            # 헤더와 구분선의 대략적인 문자 수
-            current_length = len(header_text) + 50  # 여유분 포함
+            for url, grouped_companies in url_groups.items():
+                if len(grouped_companies) > 1 and all(c in new_jobs for c in grouped_companies):
+                    rep_company = grouped_companies[0]
+                    jobs = new_jobs[rep_company]
+                    company_names = " / ".join(grouped_companies)
+                    linked_company = f"<{url}|{company_names}>"
+                    company_with_time = f"{linked_company} - {formatted_datetime}"
+                    job_lines = [f"• {self._highlight_foreign_keywords(job)[0]}" for job in jobs]
+                    job_text = "\n".join(job_lines)
+                    group_info = f"🔗 *{len(grouped_companies)}개 회사 공유 URL*"
+                    job_pieces.append(f"📢 {company_with_time} - {len(jobs)}개\n{group_info}\n{job_text}")
+                    processed_companies.update(grouped_companies)
 
             for company, jobs in new_jobs.items():
-                company_url = self.company_urls.get(company, "")
-                linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
-                company_with_time = f"{linked_company} - {formatted_datetime}"
-
-                job_lines = []
-                for job in jobs:
-                    highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
-                    job_line = f"• {highlighted_job}"
-                    if is_foreign:
-                        job_line = f"🔮 {job_line}"
-                    job_lines.append(job_line)
-
-                job_text = "\n".join(job_lines)
-                company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
-
-                # 현재 섹션을 추가했을 때의 예상 길이
-                estimated_length = current_length + len(company_section_text) + 100  # 마크업 여유분
-
-                # 2800자 초과시 현재 블록들을 먼저 전송
-                if estimated_length > CHAR_LIMIT:
-                    payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                    send_payload(payload)
-
-                    # 새 블록 시작 (계속 표시)
-                    current_blocks = []
-                    continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
-                    current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
-                    current_blocks.append({"type": "divider"})
-                    current_length = len(continuation_header) + 50
-
-                company_section = {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": company_section_text}
-                }
-                current_blocks.append(company_section)
-                current_length += len(company_section_text) + 100
-
-            # 마지막 블록들 전송
-            if current_blocks:
-                payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                send_payload(payload)
-
-        if warnings:
-            warning_header = "⚠️ *확인이 필요한 공고* (홈페이지를 직접 확인해주세요)"
-            current_text = ""
+                if company not in processed_companies:
+                    company_url = self.company_urls.get(company, "")
+                    linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
+                    company_with_time = f"{linked_company} - {formatted_datetime}"
+                    job_lines = [f"• {self._highlight_foreign_keywords(job)[0]}" for job in jobs]
+                    job_text = "\n".join(job_lines)
+                    job_pieces.append(f"📢 {company_with_time} - {len(jobs)}개\n{job_text}")
             
-            for w in warnings:
-                line = f"• {w}"
-                if len(current_text) + len(line) > CHAR_LIMIT:
-                    blocks = [
-                        {"type": "divider"},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": f"{warning_header}\n{current_text}"}}
-                    ]
-                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                    send_payload(payload)
-                    current_text = ""
-                current_text += f"\n{line}"
+            paginate_and_send(header, job_pieces)
 
-            if current_text:
-                blocks = [
-                    {"type": "divider"},
-                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{warning_header}\n{current_text}"}}
-                ]
-                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                send_payload(payload)
+        # --- 2. 경고 전송 ---
+        if warnings:
+            header = f"⚠️ *확인이 필요한 공고* ({len(warnings)}개)"
+            warning_pieces = [f"• {w}" for w in warnings]
+            paginate_and_send(header, warning_pieces)
 
+        # --- 3. 실패 전송 ---
         if failed_companies:
-            fail_header = "❌ *크롤링 실패*"
-            current_text = ""
-
-            for f in failed_companies:
-                line = f"• {f['company']}: {f['reason']}"
-                if len(current_text) + len(line) > CHAR_LIMIT:
-                    blocks = [
-                        {"type": "divider"},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": f"{fail_header}\n{current_text}"}}
-                    ]
-                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                    send_payload(payload)
-                    current_text = ""
-                current_text += f"\n{line}"
-
-            if current_text:
-                blocks = [
-                    {"type": "divider"},
-                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{fail_header}\n{current_text}"}}
-                ]
-                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                send_payload(payload)
+            header = f"❌ *크롤링 실패* ({len(failed_companies)}개)"
+            fail_pieces = [f"• {f.get('company', '알 수 없음')}: {f.get('reason', '알 수 없음')}" for f in failed_companies]
+            paginate_and_send(header, fail_pieces)
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
