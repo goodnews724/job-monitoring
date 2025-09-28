@@ -87,6 +87,19 @@ services:
       timeout: 30s
       retries: 5
 
+  metabase:
+    image: metabase/metabase:latest
+    platform: linux/arm64
+    container_name: metabase
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    volumes:
+      - ./data:/app/data  # CSV 파일 접근용
+    networks:
+      - airflow-network
+
 volumes:
   postgres-db:
 

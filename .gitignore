@@ -213,7 +213,6 @@ __marimo__/
 /data/*
 /key/*
 !/data/.gitkeep
-!/data/성과.txt
 !/key/.gitkeep
 
 /logs/
