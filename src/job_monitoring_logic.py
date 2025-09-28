@@ -29,6 +29,7 @@ class JobMonitoringDAG:
         self.max_workers = int(os.getenv('MAX_WORKERS', '3'))
         self.foreign_keywords = []  # 외국인 채용공고 키워드
         self.url_groups_for_notification = {}  # URL 그룹 정보 (슬랙 알림용)
+        self.url_crawling_cache = {}  # URL별 크롤링 결과 캐시 {url: job_titles}
 
         # requests 세션 설정 (쿠키 및 연결 유지)
         self.session = requests.Session()
@@ -97,11 +98,15 @@ class JobMonitoringDAG:
         if self.worksheet_name == '5000대_기업':
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
 
+            # 미리 전체 URL 그룹 파악
+            self.global_url_groups = self._analyze_global_url_groups(df_to_process)
+
             chunk_size = 100
             num_chunks = (len(df_to_process) - 1) // chunk_size + 1
             self.logger.info(f"'{self.worksheet_name}' 시트의 {len(df_to_process)}개 기업을 {num_chunks}개 청크로 분할하여 처리합니다.")
 
             all_current_jobs = {}
+            all_new_jobs = {}
             all_warnings = []
             all_failed_companies = []
             list_of_df_chunks = [df_to_process.iloc[i:i+chunk_size] for i in range(0, len(df_to_process), chunk_size)]
@@ -114,7 +119,7 @@ class JobMonitoringDAG:
 
                 # 각 청크별로 통합 처리 (전처리 + 크롤링)
                 self.logger.info(f"청크 {i+1}/{num_chunks} 통합 처리 시작")
-                df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_integrated(df_chunk)
+                df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_with_cache(df_chunk)
 
                 # 전체 DataFrame에 업데이트
                 df_config.update(df_chunk_processed)
@@ -129,7 +134,14 @@ class JobMonitoringDAG:
                 except Exception as e:
                     self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
 
-                warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
+                new_jobs_chunk, warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
+
+                self.logger.info(f"🔍 청크 {i+1} 결과 수집:")
+                self.logger.info(f"  - 새로운 공고: {len(new_jobs_chunk)}개 회사")
+                self.logger.info(f"  - 경고: {len(warnings)}개")
+                self.logger.info(f"  - 실패: {len(failed_companies)}개")
+
+                all_new_jobs.update(new_jobs_chunk)
                 all_warnings.extend(warnings)
                 all_failed_companies.extend(failed_companies)
 
@@ -138,8 +150,20 @@ class JobMonitoringDAG:
                     self.logger.info(f"다음 청크 처리를 위해 2분간 대기합니다.")
                     time.sleep(120)
 
-            if all_warnings or all_failed_companies:
-                self.send_slack_notification({}, all_warnings, all_failed_companies, chunk_info="요약")
+            # 전체 URL 그룹 기반으로 슬랙 메시지 최적화
+            self.url_groups_for_notification = self._prepare_global_url_groups_for_notification(all_current_jobs)
+
+            # 모든 청크 처리 완료 후 통합 알림 전송
+            self.logger.info(f"🔍 슬랙 알림 전송 조건 확인:")
+            self.logger.info(f"  - all_new_jobs: {len(all_new_jobs)}개 회사")
+            self.logger.info(f"  - all_warnings: {len(all_warnings)}개 경고")
+            self.logger.info(f"  - all_failed_companies: {len(all_failed_companies)}개 실패")
+
+            if all_new_jobs or all_warnings or all_failed_companies:
+                self.logger.info("📤 조건 만족! 통합 슬랙 알림 전송 중...")
+                self.send_slack_notification(all_new_jobs, all_warnings, all_failed_companies, chunk_info="전체 결과")
+            else:
+                self.logger.warning("⚠️ 슬랙 알림 전송 조건 불만족 - 전송할 내용 없음")
 
             if all_current_jobs:
                 self.save_jobs(all_current_jobs)
@@ -177,9 +201,181 @@ class JobMonitoringDAG:
             else:
                 self.logger.info("설정 변경 사항이 없어 Google Sheets 업데이트를 건너뜁니다.")
 
-            self.compare_and_notify(current_jobs, failed_companies)
+            self.logger.info(f"🔍 간단한 실행 모드 - 슬랙 알림 체크:")
+            self.logger.info(f"  - current_jobs: {len(current_jobs)}개 회사")
+            self.logger.info(f"  - failed_companies: {len(failed_companies)}개")
+
+            new_jobs, warnings, failed_companies_result = self.compare_and_notify(current_jobs, failed_companies)
+
+            self.logger.info(f"🔍 compare_and_notify 결과:")
+            self.logger.info(f"  - new_jobs: {len(new_jobs)}개 회사")
+            self.logger.info(f"  - warnings: {len(warnings)}개")
+            self.logger.info(f"  - failed_companies_result: {len(failed_companies_result)}개")
+
+            if new_jobs or warnings or failed_companies_result:
+                self.logger.info("📤 간단한 모드 - 슬랙 알림 전송 중...")
+                self.send_slack_notification(new_jobs, warnings, failed_companies_result, chunk_info="간단한 실행")
+            else:
+                self.logger.warning("⚠️ 간단한 모드 - 슬랙 알림 전송 조건 불만족")
 
         self.logger.info(f"✅ Job Monitoring DAG 종료 - {self.worksheet_name}")
+
+    def _analyze_global_url_groups(self, df: pd.DataFrame) -> Dict[str, List[str]]:
+        """전체 데이터에서 URL별 회사 그룹을 미리 분석합니다."""
+        url_groups = {}
+
+        for idx, row in df.iterrows():
+            url = row['job_posting_url'].strip()
+            company_name = row['회사_한글_이름']
+
+            if url not in url_groups:
+                url_groups[url] = []
+            url_groups[url].append(company_name)
+
+        # 중복 URL만 필터링
+        shared_url_groups = {url: companies for url, companies in url_groups.items() if len(companies) > 1}
+
+        if shared_url_groups:
+            self.logger.info(f"🔍 전체 URL 분석 완료: {len(shared_url_groups)}개 공유 URL 발견")
+            for url, companies in shared_url_groups.items():
+                self.logger.info(f"  - {url[:50]}... → {companies}")
+
+        return shared_url_groups
+
+    def _prepare_global_url_groups_for_notification(self, current_jobs: Dict) -> Dict[str, List[str]]:
+        """전체 처리 결과를 바탕으로 URL 그룹을 준비합니다."""
+        if not hasattr(self, 'global_url_groups'):
+            return {}
+
+        notification_groups = {}
+        for url, all_companies in self.global_url_groups.items():
+            # 실제 새로운 공고가 있는 회사들만 필터링
+            companies_with_jobs = [c for c in all_companies if c in current_jobs]
+            if len(companies_with_jobs) > 1:
+                notification_groups[url] = companies_with_jobs
+
+        if notification_groups:
+            self.logger.info(f"🎯 전체 결과 URL 그룹화: {len(notification_groups)}개 URL")
+            for url, companies in notification_groups.items():
+                self.logger.info(f"  - {url[:50]}... → {companies}")
+
+        return notification_groups
+
+    def process_companies_with_cache(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, List]:
+        """캐시를 활용한 통합 처리 (URL별 크롤링 최적화)"""
+        self.logger.info(f"캐시 활용 통합 처리 대상: {len(df)}개 회사")
+
+        # 기본 전처리
+        valid_companies_mask = (
+            df['회사_한글_이름'].notna() & (df['회사_한글_이름'].str.strip() != '') &
+            df['job_posting_url'].notna() & (df['job_posting_url'].str.strip() != '')
+        )
+
+        if valid_companies_mask.any():
+            self._fill_missing_selenium_required(df, valid_companies_mask)
+
+        companies_to_process = df[
+            valid_companies_mask &
+            (~df['selenium_required'].isin([-1, -2]))
+        ]
+
+        if companies_to_process.empty:
+            self.logger.info("처리할 회사가 없습니다.")
+            return df, {}, []
+
+        current_jobs = {}
+        failed_companies = []
+        cache_hits = 0
+        cache_misses = 0
+
+        # URL별로 그룹화
+        url_company_map = {}
+        for idx, row in companies_to_process.iterrows():
+            url = row['job_posting_url'].strip()
+            company_name = row['회사_한글_이름']
+
+            if url not in url_company_map:
+                url_company_map[url] = []
+            url_company_map[url].append((idx, company_name))
+
+        # URL별 처리 (캐시 활용)
+        for url, company_list in url_company_map.items():
+            if url in self.url_crawling_cache:
+                # 캐시 히트
+                cache_hits += len(company_list)
+                job_titles = self.url_crawling_cache[url]
+
+                for idx, company_name in company_list:
+                    current_jobs[company_name] = job_titles
+                    self.company_urls[company_name] = url
+
+                self.logger.info(f"  ✅ 캐시 사용: {url[:50]}... → {len(company_list)}개 회사 ({len(job_titles)}개 공고)")
+            else:
+                # 캐시 미스 - 크롤링 수행
+                cache_misses += len(company_list)
+                representative_idx, representative_company = company_list[0]
+                representative_row = companies_to_process.loc[representative_idx]
+
+                self.logger.info(f"  🔍 크롤링: {url[:50]}... → {len(company_list)}개 회사")
+
+                # 실제 크롤링
+                job_titles = self._crawl_single_url(url, representative_row)
+
+                if job_titles is not None:
+                    # 캐시에 저장
+                    self.url_crawling_cache[url] = job_titles
+
+                    # 모든 관련 회사에 결과 적용
+                    for idx, company_name in company_list:
+                        current_jobs[company_name] = job_titles
+                        self.company_urls[company_name] = url
+                else:
+                    # 크롤링 실패
+                    for idx, company_name in company_list:
+                        failed_companies.append({
+                            'company': company_name,
+                            'reason': 'HTML 가져오기 실패',
+                            'url': url
+                        })
+
+        self.logger.info(f"🚀 성능 개선 효과: 캐시 히트 {cache_hits}개, 새 크롤링 {len(url_company_map)}개 URL")
+        if cache_hits > 0:
+            total_requests = cache_hits + len(url_company_map)
+            saved_percentage = (cache_hits / total_requests) * 100
+            self.logger.info(f"   절약된 크롤링: {cache_hits}회 ({saved_percentage:.1f}%)")
+
+        return df, current_jobs, failed_companies
+
+    def _crawl_single_url(self, url: str, representative_row: pd.Series) -> Optional[List[str]]:
+        """단일 URL 크롤링"""
+        company_name = representative_row['회사_한글_이름']
+        use_selenium = representative_row['selenium_required']
+        selector = representative_row.get('selector', '')
+
+        html_content = self.get_html_content_for_crawling(url, use_selenium)
+        if not html_content:
+            return None
+
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # 선택자가 없으면 기본 처리 (간단화)
+            if not selector or selector.strip() == '':
+                selector = "a"  # 기본 선택자
+
+            postings = soup.select(selector)
+            if not postings:
+                return []
+
+            job_titles = [elem.get_text(strip=True) for elem in postings if elem.get_text(strip=True)]
+            job_titles = [title for title in job_titles if len(title) > 2 and len(title) < 200]
+            job_titles = list(set(job_titles))  # 중복 제거
+
+            return job_titles
+
+        except Exception as e:
+            self.logger.error(f"  - {company_name} 크롤링 오류: {e}")
+            return None
 
     def _load_foreign_keywords(self):
         """외국인_공고_키워드 시트에서 키워드들을 로드합니다."""
@@ -214,6 +410,26 @@ class JobMonitoringDAG:
             if keyword.lower() in job_title_lower:
                 return True
         return False
+
+    def _clean_job_title(self, job_title: str) -> str:
+        """공고 제목에서 불필요한 패턴들을 제거합니다."""
+        if not job_title:
+            return job_title
+
+        # D-1, D-2 같은 마감일 패턴 제거 (더 광범위한 패턴)
+        job_title = re.sub(r'D-\d+', '', job_title, flags=re.IGNORECASE)
+        job_title = re.sub(r'D-DAY', '', job_title, flags=re.IGNORECASE)
+        job_title = re.sub(r'\bD\d+', '', job_title, flags=re.IGNORECASE)  # D2, D12 같은 패턴
+        job_title = re.sub(r'마감\s*D-\d+', '', job_title, flags=re.IGNORECASE)
+
+        # 날짜시간 패턴 제거 (예: 2024.12.31 23:59)
+        job_title = re.sub(r'\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}', '', job_title)
+        job_title = re.sub(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}', '', job_title)
+
+        # 여러 공백을 하나로 정리하고 앞뒤 공백 제거
+        job_title = re.sub(r'\s+', ' ', job_title).strip()
+
+        return job_title
 
     def _highlight_foreign_keywords(self, job_title: str) -> Tuple[str, bool]:
         """채용공고 제목에서 외국인 키워드를 볼드처리하고, 외국인 공고인지 여부를 반환합니다."""
@@ -273,6 +489,10 @@ class JobMonitoringDAG:
             highlighted_title += f"*{job_title[start:end]}*"
             last_index = end
         highlighted_title += job_title[last_index:]
+
+        # 외국인 공고인 경우 문장 앞에 크리스탈볼 이모지 한 번만 추가
+        if is_foreign:
+            highlighted_title = f"🔮 {highlighted_title}"
 
         return highlighted_title, is_foreign
 
@@ -825,20 +1045,20 @@ class JobMonitoringDAG:
         self.logger.info("--- 3. 채용 공고 크롤링 종료 ---")
         return current_jobs, failed_companies
 
-    def compare_and_notify(self, current_jobs: Dict, failed_companies: List, chunk_info: str = None, save: bool = True, send_notifications: bool = True) -> Tuple[List, List]:
+    def compare_and_notify(self, current_jobs: Dict, failed_companies: List, chunk_info: str = None, save: bool = True, send_notifications: bool = True) -> Tuple[Dict, List, List]:
         self.logger.info("--- 4. 비교 및 알림 시작 ---")
         existing_jobs = self.load_existing_jobs()
         new_jobs = self.find_new_jobs(current_jobs, existing_jobs)
         warnings = self.check_suspicious_results(current_jobs, existing_jobs, new_jobs)
 
-        # send_notifications가 True일 때만 새로운 공고 즉시 알림
-        if send_notifications and (new_jobs or warnings or failed_companies):
-            self.send_slack_notification(new_jobs, warnings, failed_companies, chunk_info=chunk_info)
+        # 청크별 즉시 알림 비활성화 - 모든 청크 처리 후 통합 알림
+        # if send_notifications and (new_jobs or warnings or failed_companies):
+        #     self.send_slack_notification(new_jobs, warnings, failed_companies, chunk_info=chunk_info)
 
         if save and current_jobs:
             self.save_jobs(current_jobs)
         self.logger.info("--- 4. 비교 및 알림 종료 ---")
-        return warnings, failed_companies
+        return new_jobs, warnings, failed_companies
 
     def get_html_content(self, url, use_selenium, selector=None):
         """선택자 분석용 HTML 가져오기 메서드 (Playwright 사용)"""
@@ -912,35 +1132,61 @@ class JobMonitoringDAG:
                 if not playwright or not browser:
                     raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
-                max_retries = 2
-                for attempt in range(max_retries):
-                    try:
-                        page = browser.new_page()
-                        page.goto(url, timeout=20000)
+                try:
+                    max_retries = 2
+                    page = None
+                    for attempt in range(max_retries):
+                        try:
+                            page = browser.new_page()
+                            # 메모리 사용량 줄이기 위한 설정
+                            page.set_extra_http_headers({"Accept-Encoding": "gzip"})
 
-                        if selector:
-                            try:
-                                page.wait_for_selector(selector, timeout=20000)
+                            page.goto(url, timeout=15000)  # 타임아웃 단축
+
+                            if selector:
+                                try:
+                                    page.wait_for_selector(selector, timeout=10000)  # 타임아웃 단축
+                                    time.sleep(2)  # 대기 시간 단축
+                                except Exception:
+                                    self.logger.warning(f"선택자 '{selector}' 요소를 기다리는 데 실패했습니다.")
+                            else:
+                                time.sleep(3)  # 대기 시간 단축
+
+                            html_content = page.content()
+                            return html_content
+
+                        except Exception as e:
+                            error_msg = str(e).lower()
+                            if ("timeout" in error_msg or "target" in error_msg) and attempt < max_retries - 1:
+                                self.logger.warning(f"페이지 처리 오류 ({attempt + 1}/{max_retries}): {url} - {type(e).__name__} - 재시도 중...")
+                                if page:
+                                    try:
+                                        page.close()
+                                    except:
+                                        pass
                                 time.sleep(3)
-                            except Exception:
-                                self.logger.warning(f"선택자 '{selector}' 요소를 기다리는 데 실패했습니다.")
-                        else:
-                            time.sleep(5)
+                                continue
+                            else:
+                                raise e
+                        finally:
+                            if page:
+                                try:
+                                    page.close()
+                                except:
+                                    pass
 
-                        html_content = page.content()
-                        browser.close()
-                        playwright.stop()
-                        return html_content
+                    # 여기까지 오면 모든 재시도 실패
+                    raise Exception("모든 재시도 실패")
 
-                    except Exception as e:
-                        if "timeout" in str(e).lower() and attempt < max_retries - 1:
-                            self.logger.warning(f"페이지 로드 타임아웃 ({attempt + 1}/{max_retries}): {url} - 재시도 중...")
-                            time.sleep(5)
-                            continue
-                        else:
+                finally:
+                    # 브라우저 정리
+                    try:
+                        if browser:
                             browser.close()
+                        if playwright:
                             playwright.stop()
-                            raise e
+                    except:
+                        pass
 
         except requests.exceptions.Timeout as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패 (타임아웃): {url} - {str(e)}")
@@ -960,6 +1206,8 @@ class JobMonitoringDAG:
 
     def create_playwright_browser(self):
         """Playwright 브라우저 인스턴스 생성"""
+        playwright = None
+        browser = None
         try:
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(
@@ -972,13 +1220,23 @@ class JobMonitoringDAG:
                     "--disable-features=VizDisplayCompositor",
                     "--ignore-certificate-errors",
                     "--ignore-ssl-errors",
-                    "--ignore-certificate-errors-spki-list"
+                    "--ignore-certificate-errors-spki-list",
+                    "--memory-pressure-off",  # 메모리 압박 모드 비활성화
+                    "--max_old_space_size=2048"  # 메모리 제한 설정
                 ]
             )
             self.logger.info("Playwright 브라우저 실행 성공")
             return playwright, browser
         except Exception as e:
             self.logger.error(f"Playwright 브라우저 실행 실패: {e}")
+            # 실패 시 정리
+            try:
+                if browser:
+                    browser.close()
+                if playwright:
+                    playwright.stop()
+            except:
+                pass
             return None, None
 
     def load_existing_jobs(self) -> Dict[str, Set[str]]:
@@ -986,19 +1244,46 @@ class JobMonitoringDAG:
             return {}
         try:
             df = pd.read_csv(self.results_path, encoding='utf-8-sig')
+            if df.empty or 'job_posting_title' not in df.columns or '회사_한글_이름' not in df.columns:
+                self.logger.warning("기존 공고 파일이 비어있거나 필수 컬럼이 없습니다.")
+                return {}
             return {comp: set(df_comp['job_posting_title']) for comp, df_comp in df.groupby('회사_한글_이름')}
+        except pd.errors.EmptyDataError:
+            self.logger.warning("기존 공고 파일이 비어있습니다.")
+            return {}
         except Exception as e:
             self.logger.error(f"기존 공고 로드 오류: {e}")
             return {}
 
     def find_new_jobs(self, current_jobs: Dict, existing_jobs: Dict) -> Dict[str, List[str]]:
-        new_jobs = {comp: list(curr - existing_jobs.get(comp, set())) for comp, curr in current_jobs.items()}
-        return {c: j for c, j in new_jobs.items() if j}
+        new_jobs = {}
+        try:
+            for comp, curr in current_jobs.items():
+                try:
+                    # current_jobs의 값이 list인지 set인지 상관없이 set으로 변환
+                    if curr is None:
+                        curr = []
+                    curr_set = set(curr) if not isinstance(curr, set) else curr
+                    existing_set = existing_jobs.get(comp, set())
+                    new_jobs_for_company = list(curr_set - existing_set)
+                    if new_jobs_for_company:
+                        new_jobs[comp] = new_jobs_for_company
+                except Exception as e:
+                    self.logger.error(f"회사 '{comp}'의 새로운 공고 비교 중 오류: {e}")
+                    continue
+            return new_jobs
+        except Exception as e:
+            self.logger.error(f"새로운 공고 찾기 중 전체 오류: {e}")
+            return {}
 
     def check_suspicious_results(self, current_jobs: Dict, existing_jobs: Dict, new_jobs: Dict) -> List[str]:
         warnings = []
         for company, new_list in new_jobs.items():
-            if len(existing_jobs.get(company, set())) > 0 and len(new_list) == len(current_jobs.get(company, set())):
+            existing_count = len(existing_jobs.get(company, set()))
+            current_jobs_data = current_jobs.get(company, [])
+            current_count = len(current_jobs_data) if isinstance(current_jobs_data, (list, set)) else 0
+
+            if existing_count > 0 and len(new_list) == current_count:
                 warnings.append(f"{company}: 기존 공고가 모두 사라지고 새로운 공고만 보입니다. 홈페이지를 직접 확인해주세요.")
         return warnings
 
@@ -1024,12 +1309,20 @@ class JobMonitoringDAG:
             self.logger.error(f"파일 저장 중 오류 발생: {e}")
 
     def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List, chunk_info: str = None):
+        self.logger.info(f"🚀 send_slack_notification 호출됨:")
+        self.logger.info(f"  - new_jobs: {len(new_jobs)}개")
+        self.logger.info(f"  - warnings: {len(warnings)}개")
+        self.logger.info(f"  - failed_companies: {len(failed_companies)}개")
+        self.logger.info(f"  - chunk_info: {chunk_info}")
+
         if not self.webhook_url:
-            self.logger.error(f"{self.webhook_url_env}이 .env에 설정되지 않았습니다.")
+            self.logger.error(f"❌ 웹훅 URL 없음: {self.webhook_url_env}이 .env에 설정되지 않았습니다.")
             return
+        else:
+            self.logger.info(f"✅ 웹훅 URL 확인됨: {self.webhook_url[:50]}...")
 
         if not new_jobs and not warnings and not failed_companies:
-            self.logger.info("알림 보낼 내용이 없습니다.")
+            self.logger.warning("❌ 알림 보낼 내용이 없습니다.")
             return
 
         kst = pytz.timezone('Asia/Seoul')
@@ -1038,8 +1331,29 @@ class JobMonitoringDAG:
         weekdays = ['월', '화', '수', '목', '금', '토', '일']
         formatted_datetime = f"{current_datetime.month}월 {current_datetime.day}일 ({weekdays[current_datetime.weekday()]}) {current_datetime.strftime('%H:%M')}"
 
+        def sanitize_slack_text(text: str) -> str:
+            """슬랙 메시지용 텍스트를 안전하게 처리합니다."""
+            if not text:
+                return ""
+            # JSON 특수 문자 이스케이프
+            text = text.replace('\\', '\\\\').replace('"', '\\"')
+            # 닫히지 않은 마크다운 수정
+            if text.count('*') % 2 == 1:
+                text += '*'
+            if text.count('_') % 2 == 1:
+                text += '_'
+            # 텍스트 길이 제한 (안전 마진 포함)
+            if len(text) > 2900:
+                text = text[:2900] + "..."
+            return text
+
         def send_payload(payload):
             try:
+                # 모든 텍스트 필드 안전하게 처리
+                for block in payload.get('blocks', []):
+                    if block.get('type') == 'section' and 'text' in block:
+                        block['text']['text'] = sanitize_slack_text(block['text']['text'])
+
                 self.logger.info(f"📤 슬랙 메시지 전송 시도 (블록 개수: {len(payload.get('blocks', []))})")
                 response = requests.post(self.webhook_url, json=payload, timeout=15)
                 if response.status_code == 200:
@@ -1049,84 +1363,178 @@ class JobMonitoringDAG:
             except Exception as e:
                 self.logger.error(f"❌ 슬랙 알림 전송 오류: {e}")
 
-        def paginate_and_send(header_template: str, content_pieces: List[str]):
-            if not content_pieces:
-                return
+        def create_unified_message():
+            """통합 메시지를 생성합니다."""
+            content_sections = []
 
+            # 요약 헤더 생성
+            summary_parts = []
+            total_new_jobs = sum(len(jobs) for jobs in new_jobs.values()) if new_jobs else 0
+            foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job)) if new_jobs else 0
+
+            if total_new_jobs > 0:
+                foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
+                summary_parts.append(f"새로운 공고: {total_new_jobs}개{foreign_info}")
+            if warnings:
+                summary_parts.append(f"홈페이지 확인: {len(warnings)}개")
+            if failed_companies:
+                summary_parts.append(f"실패: {len(failed_companies)}개")
+
+            chunk_str = f"({chunk_info}) " if chunk_info else ""
+            summary = " | ".join(summary_parts)
+            header = f":robot_face: **채용공고 모니터링 결과** {chunk_str}({current_time})\n*{summary}*"
+
+            # 1. 새로운 공고 섹션
+            if new_jobs:
+                processed_companies = set()
+                # 전체 URL 그룹 사용 (5000대_기업) 또는 청크별 그룹 사용 (기타)
+                url_groups = getattr(self, 'global_url_groups', {}) or getattr(self, 'url_groups_for_notification', {})
+
+                # URL 그룹 처리 (같은 URL을 사용하는 여러 회사들)
+                for url, grouped_companies in url_groups.items():
+                    if len(grouped_companies) > 1:
+                        # 그룹에 속한 회사들 중 새로운 공고가 있는 회사들만 확인
+                        companies_with_jobs = [c for c in grouped_companies if c in new_jobs]
+                        if companies_with_jobs:
+                            # 대표 회사의 공고를 사용 (모든 회사가 같은 URL이므로 공고도 동일)
+                            rep_company = companies_with_jobs[0]
+                            jobs = new_jobs[rep_company]
+                            company_names = " / ".join(companies_with_jobs)
+                            linked_company = f"<{url}|{company_names}>"
+                            company_with_time = f"{linked_company} - {formatted_datetime}"
+                            job_lines = [f"  • {self._highlight_foreign_keywords(self._clean_job_title(job))[0]}" for job in jobs]
+                            job_text = "\n".join(job_lines)
+                            group_info = f"🔗 *{len(companies_with_jobs)}개 회사 공유 URL*"
+                            content_sections.append(f"📢 {company_with_time} - {len(jobs)}개\n{group_info}\n{job_text}")
+                            processed_companies.update(companies_with_jobs)
+
+                # 개별 회사 처리 (URL 그룹에 속하지 않는 회사들)
+                for company, jobs in new_jobs.items():
+                    if company not in processed_companies:
+                        company_url = self.company_urls.get(company, "")
+                        linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
+                        company_with_time = f"{linked_company} - {formatted_datetime}"
+                        job_lines = [f"  • {self._highlight_foreign_keywords(self._clean_job_title(job))[0]}" for job in jobs]
+                        job_text = "\n".join(job_lines)
+                        content_sections.append(f"📢 {company_with_time} - {len(jobs)}개\n{job_text}")
+
+            # 2. 확인이 필요한 공고 섹션
+            if warnings:
+                warning_header = "⚠️ 확인이 필요한 회사들 (추가 공고가 있을 수 있으니 홈페이지를 직접 확인해주세요):"
+                warning_section = warning_header
+
+                for i, warning in enumerate(warnings):
+                    # "회사명: 메시지" 형태에서 회사명만 추출
+                    company_name = warning.split(':')[0] if ':' in warning else warning
+                    new_line = f"\n{company_name}"
+
+                    # 길이 체크: 2000자 초과하면 현재 섹션 저장하고 새 섹션 시작
+                    if len(warning_section + new_line) > 2000:
+                        content_sections.append(warning_section)
+                        warning_section = "⚠️ (계속)" + new_line
+                    else:
+                        warning_section += new_line
+
+                # 마지막 섹션 추가
+                if warning_section != warning_header:
+                    content_sections.append(warning_section)
+
+            # 3. 실패한 공고 섹션
+            if failed_companies:
+                failed_header = ":x: 크롤링에 실패한 회사들 (구글 시트에서 수정하거나 홈페이지를 확인해주세요):"
+                failed_section = failed_header
+
+                for failed in failed_companies:
+                    company_name = failed.get('company', '알 수 없음')
+                    reason = failed.get('reason', '알 수 없음')
+                    new_line = f"\n{company_name}: {reason}"
+
+                    # 길이 체크: 2000자 초과하면 현재 섹션 저장하고 새 섹션 시작
+                    if len(failed_section + new_line) > 2000:
+                        content_sections.append(failed_section)
+                        failed_section = ":x: (계속)" + new_line
+                    else:
+                        failed_section += new_line
+
+                # 마지막 섹션 추가
+                if failed_section != failed_header:
+                    content_sections.append(failed_section)
+
+            return header, content_sections
+
+        def paginate_and_send_unified(header: str, content_sections: List[str]):
+            """통합 메시지를 페이징하여 전송합니다."""
             CHAR_LIMIT = 2800
-            pages = []
-            current_page_text = ""
-            for piece in content_pieces:
-                separator = "\n\n" if current_page_text else ""
-                if len(current_page_text) + len(separator) + len(piece) > CHAR_LIMIT:
-                    if current_page_text:
-                        pages.append(current_page_text)
-                    current_page_text = piece.lstrip()
-                else:
-                    current_page_text += separator + piece
-            if current_page_text:
-                pages.append(current_page_text)
 
-            for i, page_text in enumerate(pages):
-                header = header_template
-                if len(pages) > 1:
-                    header += f" ({i+1}/{len(pages)})")
+            # 전체 컨텐츠를 하나의 문자열로 결합
+            full_content = "\n".join(content_sections)
 
+            # 헤더 길이를 고려하여 실제 컨텐츠 제한 계산
+            header_overhead = len(header) + 100  # 여유분 포함
+            content_limit = CHAR_LIMIT - header_overhead
+
+            if len(full_content) <= content_limit:
+                # 한 번에 전송 가능
                 blocks = [
                     {"type": "section", "text": {"type": "mrkdwn", "text": header}},
                     {"type": "divider"},
-                    {"type": "section", "text": {"type": "mrkdwn", "text": page_text}}
+                    {"type": "section", "text": {"type": "mrkdwn", "text": full_content}}
                 ]
                 payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
                 send_payload(payload)
+            else:
+                # 페이징 필요
+                pages = []
+                current_page = ""
 
-        # --- 1. 새로운 공고 전송 ---
-        if new_jobs:
-            total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
-            foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job))
-            chunk_str = f"({chunk_info}) " if chunk_info else ""
-            foreign_info = f" (외국인 채용: {foreign_job_count}개 :수정구:)" if foreign_job_count > 0 else ""
-            header = f":짠: *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
-            
-            job_pieces = []
-            processed_companies = set()
-            url_groups = getattr(self, 'url_groups_for_notification', {})
+                for section in content_sections:
+                    separator = "\n" if current_page else ""
+                    if len(current_page) + len(separator) + len(section) > content_limit:
+                        if current_page:
+                            pages.append(current_page)
+                        current_page = section
+                    else:
+                        current_page += separator + section
 
-            for url, grouped_companies in url_groups.items():
-                if len(grouped_companies) > 1 and all(c in new_jobs for c in grouped_companies):
-                    rep_company = grouped_companies[0]
-                    jobs = new_jobs[rep_company]
-                    company_names = " / ".join(grouped_companies)
-                    linked_company = f"<{url}|{company_names}>"
-                    company_with_time = f"{linked_company} - {formatted_datetime}"
-                    job_lines = [f"• {self._highlight_foreign_keywords(job)[0]}" for job in jobs]
-                    job_text = "\n".join(job_lines)
-                    group_info = f"🔗 *{len(grouped_companies)}개 회사 공유 URL*"
-                    job_pieces.append(f"📢 {company_with_time} - {len(jobs)}개\n{group_info}\n{job_text}")
-                    processed_companies.update(grouped_companies)
+                if current_page:
+                    pages.append(current_page)
 
-            for company, jobs in new_jobs.items():
-                if company not in processed_companies:
-                    company_url = self.company_urls.get(company, "")
-                    linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
-                    company_with_time = f"{linked_company} - {formatted_datetime}"
-                    job_lines = [f"• {self._highlight_foreign_keywords(job)[0]}" for job in jobs]
-                    job_text = "\n".join(job_lines)
-                    job_pieces.append(f"📢 {company_with_time} - {len(jobs)}개\n{job_text}")
-            
-            paginate_and_send(header, job_pieces)
+                # 각 페이지 전송 (연속성을 위한 개선)
+                for i, page_content in enumerate(pages):
+                    if i == 0:
+                        # 첫 번째 페이지
+                        if len(pages) > 1:
+                            page_header = f"{header}"
+                            page_footer = f"\n\n*계속... ({i+1}/{len(pages)})*"
+                            page_content_with_footer = page_content + page_footer
+                        else:
+                            page_header = header
+                            page_content_with_footer = page_content
+                    elif i == len(pages) - 1:
+                        # 마지막 페이지
+                        page_header = f"*...이어서 ({i+1}/{len(pages)})*"
+                        page_content_with_footer = f"{page_content}\n\n:white_check_mark: *전체 결과 끝*"
+                    else:
+                        # 중간 페이지
+                        page_header = f"*...이어서 ({i+1}/{len(pages)})*"
+                        page_footer = f"\n\n*계속... ({i+1}/{len(pages)})*"
+                        page_content_with_footer = page_content + page_footer
 
-        # --- 2. 경고 전송 ---
-        if warnings:
-            header = f"⚠️ *확인이 필요한 공고* ({len(warnings)}개)"
-            warning_pieces = [f"• {w}" for w in warnings]
-            paginate_and_send(header, warning_pieces)
+                    blocks = [
+                        {"type": "section", "text": {"type": "mrkdwn", "text": page_header}},
+                        {"type": "divider"},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
+                    ]
+                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                    send_payload(payload)
 
-        # --- 3. 실패 전송 ---
-        if failed_companies:
-            header = f"❌ *크롤링 실패* ({len(failed_companies)}개)"
-            fail_pieces = [f"• {f.get('company', '알 수 없음')}: {f.get('reason', '알 수 없음')}" for f in failed_companies]
-            paginate_and_send(header, fail_pieces)
+                    # 페이지 간 최소 간격 (연속성 확보)
+                    if i < len(pages) - 1:
+                        time.sleep(0.5)
+
+        # 통합 메시지 생성 및 전송
+        header, content_sections = create_unified_message()
+        paginate_and_send_unified(header, content_sections)
 
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
