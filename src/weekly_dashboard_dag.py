@@ -38,19 +38,34 @@ dag = DAG(
 
 def sync_foreign_keywords():
     """구글 시트에서 외국인 키워드를 동기화"""
-    import subprocess
-    result = subprocess.run([
-        'python', '/opt/airflow/data/update_foreign_keywords.py'
-    ], capture_output=True, text=True, cwd='/opt/airflow')
+    try:
+        from google_sheet_utils import GoogleSheetManager
 
-    print("키워드 동기화 출력:")
-    print(result.stdout)
-    if result.stderr:
-        print("에러:")
-        print(result.stderr)
+        base_dir = '/opt/airflow'
+        sheet_manager = GoogleSheetManager(base_dir)
 
-    if result.returncode != 0:
-        raise Exception(f"키워드 동기화 실패: {result.stderr}")
+        # 외국인 키워드 시트에서 데이터 로드
+        df_keywords = sheet_manager.get_all_records_as_df('외국인_공고_키워드')
+
+        if df_keywords.empty:
+            print("외국인 키워드 시트가 비어있거나 찾을 수 없습니다.")
+            return
+
+        keywords = []
+        # B열부터 모든 열의 값들을 수집
+        for col in df_keywords.columns[1:]:  # A열(인덱스) 제외
+            col_keywords = df_keywords[col].dropna().tolist()
+            keywords.extend([str(k).strip() for k in col_keywords if str(k).strip()])
+
+        # 중복 제거 및 빈 값 제거
+        keywords = list(set([k for k in keywords if k and k != 'nan']))
+
+        print(f"✅ 외국인 채용 키워드 {len(keywords)}개 동기화 완료")
+        print(f"키워드 예시: {keywords[:5]}..." if len(keywords) > 5 else f"전체 키워드: {keywords}")
+
+    except Exception as e:
+        print(f"❌ 키워드 동기화 실패: {e}")
+        raise Exception(f"키워드 동기화 실패: {e}")
 
 def update_metabase_data():
     """메타베이스용 데이터는 이미 Airflow DAG에서 수집됨"""
