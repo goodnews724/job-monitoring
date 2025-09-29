@@ -32,6 +32,7 @@ dag = DAG(
     description='주간 대시보드 데이터 업데이트 및 이메일 발송',
     schedule_interval='0 9 * * 1',  # 매주 월요일 오전 9시 (크론탭: 분 시 일 월 요일)
     catchup=False,
+    is_paused_upon_creation=True,  # 생성 시 일시정지 상태
     tags=['dashboard', 'weekly', 'email']
 )
 

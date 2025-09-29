@@ -8,7 +8,6 @@ x-airflow-common: &airflow-common
     - AIRFLOW__CORE__EXECUTOR=LocalExecutor
     - AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL=30
     - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-    - MAX_WORKERS=${MAX_WORKERS:-3}
     - AIRFLOW_UID=50000
     - AIRFLOW_GID=0
     - GOOGLE_SHEET_KEY=${GOOGLE_SHEET_KEY}
@@ -38,6 +37,7 @@ services:
   postgres:
     image: postgres:13
     platform: linux/arm64
+    restart: unless-stopped
     environment:
       - POSTGRES_USER=airflow
       - POSTGRES_PASSWORD=airflow
@@ -57,6 +57,7 @@ services:
   redis:
     image: redis:latest
     platform: linux/arm64
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -69,6 +70,7 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
+    restart: unless-stopped
     command: bash -c "airflow db init && airflow users create --username admin --password admin123 --firstname Admin --lastname User --role Admin --email admin@example.com || true && airflow webserver"
     ports:
       - "8080:8080"
@@ -80,6 +82,7 @@ services:
 
   airflow-scheduler:
     <<: *airflow-common
+    restart: unless-stopped
     command: scheduler
     healthcheck:
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname)"]
@@ -91,6 +94,7 @@ services:
     image: metabase/metabase:latest
     platform: linux/arm64
     container_name: metabase
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:

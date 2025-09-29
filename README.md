@@ -1025,12 +1025,12 @@ job-monitoring/
 - 가중치 기반 최적 선택자 선택
 - UI 요소 제외 필터 (네비게이션, 푸터, 광고)
 
-### 2. 고성능 병렬 처리
+### 2. 안정적인 순차 처리
 
-**멀티스레드 크롤링:**
-- ThreadPoolExecutor 기반 병렬 처리 (기본 3개 워커)
-- Selenium 필요성 판단과 크롤링 동시 병렬화
-- 청크 단위 처리로 메모리 효율성 확보
+**순차적 크롤링:**
+- 메모리 사용량 최적화된 순차 처리
+- Selenium 필요성 판단과 크롤링 순차 실행
+- 청크 단위 처리로 시스템 안정성 확보
 
 **안전한 대용량 처리:**
 - 5000대 기업을 100개씩 청크 분할
@@ -1101,7 +1101,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR_WEBHOOK
 TOP5000COMPANY_URL=https://hooks.slack.com/services/YOUR_TOP5000_WEBHOOK
 
 # 성능 설정
-MAX_WORKERS=3  # 병렬 처리 워커 수
+# MAX_WORKERS 설정 제거됨 (순차 처리로 변경)
 ```
 
 ### 4. Google API 설정
@@ -1206,10 +1206,10 @@ du -sh data/ logs/
 
 ### 성능 최적화 설정
 
-**병렬 처리 조정:**
+**처리 방식 변경:**
 ```python
-# .env 파일
-MAX_WORKERS=3  # CPU 코어 수에 맞춰 조정 (권장: 2-4)
+# 순차 처리로 변경됨 - MAX_WORKERS 설정 불필요
+# 메모리 사용량과 시스템 안정성 최적화
 ```
 
 **청크 크기 조정:**

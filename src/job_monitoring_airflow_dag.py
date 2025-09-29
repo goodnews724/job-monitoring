@@ -46,6 +46,7 @@ with DAG(
     schedule_interval='0 10,15 * * *',  # 매일 10시, 15시 (KST)
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
     catchup=False,
+    is_paused_upon_creation=True,  # 생성 시 일시정지 상태
 ) as dag:
     run_task = PythonOperator(
         task_id='run_job_monitoring',
@@ -59,6 +60,7 @@ with DAG(
     schedule_interval='0 19 * * *',  # 매일 19시 (KST)
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
     catchup=False,
+    is_paused_upon_creation=True,  # 생성 시 일시정지 상태
 ) as top5000_dag:
     run_top5000_task = PythonOperator(
         task_id='run_top5000_monitoring',

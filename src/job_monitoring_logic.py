@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from google_sheet_utils import GoogleSheetManager
 from analyze_titles import JobPostingSelectorAnalyzer
 from utils import stabilize_selector, SeleniumRequirementChecker
-import concurrent.futures
 
 load_dotenv()
 
@@ -26,7 +25,6 @@ class JobMonitoringDAG:
         self.results_path = os.path.join(self.data_dir, results_filename)
         self.webhook_url = os.getenv(webhook_url_env)
         self.company_urls = {}
-        self.max_workers = int(os.getenv('MAX_WORKERS', '3'))
         self.foreign_keywords = []  # 외국인 채용공고 키워드
         self.url_groups_for_notification = {}  # URL 그룹 정보 (슬랙 알림용)
         self.url_crawling_cache = {}  # URL별 크롤링 결과 캐시 {url: job_titles}
@@ -594,20 +592,20 @@ class JobMonitoringDAG:
         failed_companies = []
         url_results_cache = {}  # URL별 크롤링 결과 캐시
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # URL별로 대표 회사를 선택하여 처리
-            url_args = []
-            for url, company_indices in url_groups.items():
-                # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
-                representative_idx = self._select_representative_company(companies_to_process, company_indices)
-                representative_row = companies_to_process.loc[representative_idx]
-                is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
-                url_args.append((representative_idx, representative_row, existing_selectors, url, is_shared))
+        # URL별 순차 처리
+        results = []
+        for url, company_indices in url_groups.items():
+            # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
+            representative_idx = self._select_representative_company(companies_to_process, company_indices)
+            representative_row = companies_to_process.loc[representative_idx]
+            is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
+            url_args = (representative_idx, representative_row, existing_selectors, url, is_shared)
 
             # URL별 크롤링 실행
-            results = executor.map(self._process_url_with_companies, url_args)
+            result = self._process_url_with_companies(url_args)
+            results.append(result)
 
-            for url, result_selector, job_titles, error_info in results:
+        for url, result_selector, job_titles, error_info in results:
                 url_results_cache[url] = {
                     'selector': result_selector,
                     'job_titles': job_titles,
@@ -690,11 +688,14 @@ class JobMonitoringDAG:
         existing_selectors = self._get_existing_selectors(df)
         self.logger.info(f"기존 회사들에서 사용 중인 선택자 {len(existing_selectors)}개 (20자 이상만)를 우선 적용합니다.")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            args_list = [(index, row, existing_selectors) for index, row in companies_to_process.iterrows()]
-            results = executor.map(self._process_company_preprocess, args_list)
+        # 순차 처리
+        results = []
+        for index, row in companies_to_process.iterrows():
+            args = (index, row, existing_selectors)
+            result = self._process_company_complete(args)
+            results.append(result)
 
-            for index, new_selector, selenium_status in results:
+        for index, new_selector, selenium_status in results:
                 if new_selector:
                     df.loc[index, 'selector'] = new_selector
                     self.logger.info(f"  - 선택자 적용 성공: {new_selector}")
@@ -956,24 +957,18 @@ class JobMonitoringDAG:
 
         self.logger.info(f"{len(missing_selenium)}개 회사의 selenium_required 값을 병렬로 자동 설정 중...")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_index = {
-                executor.submit(self._determine_selenium_requirement, row['job_posting_url'], row['회사_한글_이름']): index
-                for index, row in missing_selenium.iterrows()
-            }
+        # 순차 처리
+        for index, row in missing_selenium.iterrows():
+            company_name = row['회사_한글_이름']
+            try:
+                selenium_required = self._determine_selenium_requirement(row['job_posting_url'], row['회사_한글_이름'])
+                df.loc[index, 'selenium_required'] = int(selenium_required)
 
-            for future in concurrent.futures.as_completed(future_to_index):
-                index = future_to_index[future]
-                company_name = missing_selenium.loc[index, '회사_한글_이름']
-                try:
-                    selenium_required = future.result()
-                    df.loc[index, 'selenium_required'] = int(selenium_required)
-
-                    selenium_text = "Selenium 필요" if selenium_required else "requests 사용"
-                    self.logger.info(f"  - {company_name}: {selenium_text}")
-                except Exception as e:
-                    self.logger.error(f"  - {company_name} 처리 중 오류 발생: {e}")
-                    df.loc[index, 'selenium_required'] = 1  # 오류 발생 시 기본값
+                selenium_text = "Selenium 필요" if selenium_required else "requests 사용"
+                self.logger.info(f"  - {company_name}: {selenium_text}")
+            except Exception as e:
+                self.logger.error(f"  - {company_name} 처리 중 오류 발생: {e}")
+                df.loc[index, 'selenium_required'] = 1  # 오류 발생 시 기본값
 
         self.logger.info(f"{len(missing_selenium)}개 회사의 selenium_required 값 설정 완료.")
     
@@ -1031,11 +1026,14 @@ class JobMonitoringDAG:
         current_jobs = {}
         failed_companies = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            args_list = [(row, df_crawl) for _, row in df_crawl.iterrows()]
-            results = executor.map(self._crawl_company, args_list)
+        # 순차 처리
+        results = []
+        for _, row in df_crawl.iterrows():
+            args = (row, df_crawl)
+            result = self._crawl_company(args)
+            results.append(result)
 
-            for result in results:
+        for result in results:
                 company_name, job_titles = result
                 if company_name and job_titles:
                     current_jobs[company_name] = job_titles
