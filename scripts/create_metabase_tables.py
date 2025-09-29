@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 def create_database_connection():
     """PostgreSQL 연결"""
-    engine = create_engine('postgresql://airflow:airflow@localhost:5432/airflow')
+    engine = create_engine('postgresql://airflow:airflow@postgres:5432/airflow')
     return engine
 
 def load_csv_to_postgres():
@@ -19,7 +19,7 @@ def load_csv_to_postgres():
 
     # 5000대 기업 데이터
     try:
-        df_5000 = pd.read_csv('/Users/goodnews/Documents/projects/test/job-monitoring/data/top_5000_postings_latest.csv')
+        df_5000 = pd.read_csv('/opt/airflow/data/top_5000_postings_latest.csv')
         df_5000['crawl_datetime'] = pd.to_datetime(df_5000['crawl_datetime'])
         df_5000['dag_type'] = '5000대_기업'
         df_5000.to_sql('job_postings_5000', engine, if_exists='replace', index=False)
@@ -29,7 +29,7 @@ def load_csv_to_postgres():
 
     # 등록 채용홈페이지 데이터
     try:
-        df_general = pd.read_csv('/Users/goodnews/Documents/projects/test/job-monitoring/data/job_postings_latest.csv')
+        df_general = pd.read_csv('/opt/airflow/data/job_postings_latest.csv')
         df_general['crawl_datetime'] = pd.to_datetime(df_general['crawl_datetime'])
         df_general['dag_type'] = '등록_채용홈페이지'
         df_general.to_sql('job_postings_general', engine, if_exists='replace', index=False)
