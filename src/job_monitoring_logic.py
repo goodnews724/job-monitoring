@@ -562,7 +562,6 @@ class JobMonitoringDAG:
         memory_percent = psutil.virtual_memory().percent
         if memory_percent > 80:
             self.logger.warning(f"⚠️ 메모리 사용률 높음: {memory_percent:.1f}% - 처리 속도를 늦춥니다")
-            import time
             time.sleep(5)  # 메모리 부족 시 5초 대기
 
         # 1. selenium_required 값 채우기
@@ -627,7 +626,6 @@ class JobMonitoringDAG:
                 self.logger.info(f"📊 메모리 사용률: {memory_percent:.1f}%")
                 if memory_percent > 85:
                     self.logger.warning("⚠️ 메모리 부족 - 10초 대기")
-                    import time
                     time.sleep(10)
                 else:
                     time.sleep(1)  # 일반적인 쿨다운
