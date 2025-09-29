@@ -30,6 +30,8 @@ x-airflow-common: &airflow-common
   depends_on:
     - postgres
     - redis
+  links:
+    - postgres
   networks:
     - airflow-network
 
