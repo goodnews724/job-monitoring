@@ -557,6 +557,14 @@ class JobMonitoringDAG:
         """전처리와 크롤링을 한번에 통합 처리"""
         self.logger.info(f"통합 처리 대상: {len(df)}개 회사")
 
+        # 메모리 사용량 체크
+        import psutil
+        memory_percent = psutil.virtual_memory().percent
+        if memory_percent > 80:
+            self.logger.warning(f"⚠️ 메모리 사용률 높음: {memory_percent:.1f}% - 처리 속도를 늦춥니다")
+            import time
+            time.sleep(5)  # 메모리 부족 시 5초 대기
+
         # 1. selenium_required 값 채우기
         valid_companies_mask = (
             df['회사_한글_이름'].notna() & (df['회사_한글_이름'].str.strip() != '') &
@@ -594,16 +602,35 @@ class JobMonitoringDAG:
 
         # URL별 순차 처리
         results = []
+        processed_count = 0
+        total_urls = len(url_groups)
+
         for url, company_indices in url_groups.items():
+            processed_count += 1
             # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
             representative_idx = self._select_representative_company(companies_to_process, company_indices)
             representative_row = companies_to_process.loc[representative_idx]
             is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
             url_args = (representative_idx, representative_row, existing_selectors, url, is_shared)
 
+            # 진행 상황 로그
+            self.logger.info(f"🔄 진행 상황: {processed_count}/{total_urls} ({processed_count/total_urls*100:.1f}%)")
+
             # URL별 크롤링 실행
             result = self._process_url_with_companies(url_args)
             results.append(result)
+
+            # 10개마다 메모리 체크 및 쿨다운
+            if processed_count % 10 == 0:
+                import psutil
+                memory_percent = psutil.virtual_memory().percent
+                self.logger.info(f"📊 메모리 사용률: {memory_percent:.1f}%")
+                if memory_percent > 85:
+                    self.logger.warning("⚠️ 메모리 부족 - 10초 대기")
+                    import time
+                    time.sleep(10)
+                else:
+                    time.sleep(1)  # 일반적인 쿨다운
 
         for url, result_selector, job_titles, error_info in results:
                 url_results_cache[url] = {
@@ -1103,7 +1130,15 @@ class JobMonitoringDAG:
 
     def get_html_content_for_crawling(self, url, use_selenium, selector=None):
         """실제 크롤링용 HTML 가져오기 메서드 (Playwright 사용)"""
+        import signal
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError("크롤링 타임아웃")
+
         try:
+            # 개별 URL 크롤링에 5분 타임아웃 설정
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(300)  # 5분
             if not use_selenium:
                 # 더 현실적인 브라우저 헤더 사용
                 headers = {
@@ -1198,9 +1233,18 @@ class JobMonitoringDAG:
         except requests.exceptions.SSLError as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패 (SSL 오류): {url} - {str(e)}")
             return None
+        except TimeoutError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (타임아웃): {url} - {str(e)}")
+            return None
         except Exception as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패 (기타 오류): {url} - {type(e).__name__}: {str(e)}")
             return None
+        finally:
+            # 타임아웃 알람 해제
+            try:
+                signal.alarm(0)
+            except:
+                pass
 
     def create_playwright_browser(self):
         """Playwright 브라우저 인스턴스 생성"""

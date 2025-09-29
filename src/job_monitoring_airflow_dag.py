@@ -36,6 +36,7 @@ default_args = {
     'email_on_retry': False,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
+    'task_concurrency': 1,  # 동시 실행 태스크 1개로 제한
 }
 
 # 기본 채용홈페이지 모음 DAG - 매일 오전 10시와 오후 3시 실행 (한국시간)
