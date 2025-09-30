@@ -116,3 +116,94 @@ class GoogleSheetManager:
         except Exception as e:
             self.logger.error(f"❌ 시트 안전 업데이트 실패: {e}")
             return False
+
+    def update_selector_column_only(self, df: pd.DataFrame, sheet_name: str):
+        """선택자 컬럼만 선택적으로 업데이트합니다."""
+        if not self.gc:
+            return False
+
+        try:
+            spreadsheet = self.gc.open_by_key(self.sheet_key)
+            if sheet_name:
+                worksheet = spreadsheet.worksheet(sheet_name)
+            else:
+                worksheet = spreadsheet.sheet1
+
+            # 헤더 행 가져오기
+            header_row = worksheet.row_values(1)
+
+            # selector 컬럼 인덱스 찾기
+            if 'selector' not in header_row:
+                self.logger.warning("selector 컬럼이 시트에 없습니다.")
+                return False
+
+            selector_col_index = header_row.index('selector') + 1  # 1-based index
+            selector_col_letter = chr(ord('A') + selector_col_index - 1)
+
+            # 회사 이름 컬럼 인덱스 찾기
+            company_name_col = None
+            for col in ['회사_한글_이름', '회사명', 'company_name']:
+                if col in header_row:
+                    company_name_col = header_row.index(col)
+                    break
+
+            if company_name_col is None:
+                self.logger.error("회사명 컬럼을 찾을 수 없습니다.")
+                return False
+
+            # 현재 시트의 데이터 가져오기
+            all_values = worksheet.get_all_values()
+
+            # 업데이트할 선택자들 수집
+            updates = []
+            updated_count = 0
+
+            # 디버깅: DataFrame의 선택자 현황 확인
+            total_rows = len(df)
+            rows_with_selectors = 0
+            for _, row in df.iterrows():
+                if pd.notna(row.get('selector')) and str(row.get('selector')).strip():
+                    rows_with_selectors += 1
+
+            self.logger.info(f"DataFrame 선택자 현황: 전체 {total_rows}행 중 {rows_with_selectors}행에 선택자 존재")
+
+            for _, row in df.iterrows():
+                company_name = row.get('회사_한글_이름', '')
+                new_selector = str(row.get('selector', '')).strip()
+
+                if not company_name or not new_selector:
+                    continue
+
+                # 디버깅: 처리할 회사 로깅
+                self.logger.debug(f"선택자 처리 중: {company_name} -> {new_selector[:50]}...")
+
+                # 시트에서 해당 회사 찾기
+                for sheet_row_idx, sheet_row in enumerate(all_values[1:], 2):  # 헤더 제외, 2부터 시작
+                    if len(sheet_row) > company_name_col and sheet_row[company_name_col] == company_name:
+                        # 현재 선택자 확인
+                        current_selector = ''
+                        if len(sheet_row) > selector_col_index - 1:
+                            current_selector = sheet_row[selector_col_index - 1].strip()
+
+                        # 새 선택자가 다르면 업데이트
+                        if current_selector != new_selector:
+                            cell_address = f"{selector_col_letter}{sheet_row_idx}"
+                            updates.append({
+                                'range': cell_address,
+                                'values': [[new_selector]]
+                            })
+                            updated_count += 1
+                        break
+
+            # 배치 업데이트 실행
+            if updates:
+                worksheet.batch_update(updates)
+                self.logger.info(f"✅ 선택자 {updated_count}개 업데이트 완료")
+            else:
+                self.logger.info("업데이트할 선택자가 없습니다.")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"❌ 선택자 업데이트 실패: {e}")
+            return False

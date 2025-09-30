@@ -94,7 +94,23 @@ class JobMonitoringDAG:
             self.foreign_keywords = self._load_foreign_keywords()
 
         if self.worksheet_name == '5000대_기업':
+            # 1. 먼저 original_selector를 selector로 안정화
+            self.logger.info("original_selector를 selector로 안정화 중...")
+            df_config = self.stabilize_selectors(df_config)
+
+            # 2. 안정화된 데이터로 처리 대상 필터링
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
+
+            # 3. 청크 처리 전 기존 선택자 백업 (덮어쓰기 방지)
+            self.logger.info("청크 처리 전 기존 선택자 정보 백업 중...")
+            self.existing_selectors_backup = {}
+            if 'selector' in df_config.columns:
+                for idx, row in df_config.iterrows():
+                    if pd.notna(row.get('selector')) and str(row.get('selector')).strip():
+                        company_name = row.get('회사_한글_이름', '')
+                        if company_name:
+                            self.existing_selectors_backup[company_name] = str(row['selector']).strip()
+                self.logger.info(f"기존 선택자 {len(self.existing_selectors_backup)}개 백업 완료")
 
             # 미리 전체 URL 그룹 파악
             self.global_url_groups = self._analyze_global_url_groups(df_to_process)
@@ -119,18 +135,67 @@ class JobMonitoringDAG:
                 self.logger.info(f"청크 {i+1}/{num_chunks} 통합 처리 시작")
                 df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_with_cache(df_chunk)
 
-                # 전체 DataFrame에 업데이트
-                df_config.update(df_chunk_processed)
+                # 전체 DataFrame에 업데이트 (인덱스 기반으로 올바르게)
+                updated_selectors_count = 0
+                for idx in df_chunk_processed.index:
+                    if idx in df_config.index:
+                        for col in df_chunk_processed.columns:
+                            old_value = df_config.loc[idx, col]
+                            new_value = df_chunk_processed.loc[idx, col]
+                            df_config.loc[idx, col] = new_value
+                            # 선택자가 업데이트된 경우 로깅
+                            if col == 'selector' and str(old_value).strip() != str(new_value).strip() and str(new_value).strip():
+                                company_name = df_config.loc[idx, '회사_한글_이름'] if '회사_한글_이름' in df_config.columns else f"인덱스_{idx}"
+                                self.logger.info(f"📝 선택자 업데이트: {company_name} = '{new_value}'")
+                                updated_selectors_count += 1
+
+                if updated_selectors_count > 0:
+                    self.logger.info(f"✅ 청크에서 총 {updated_selectors_count}개 선택자 업데이트됨")
+
                 all_current_jobs.update(current_jobs_chunk)
 
-                # 100개 청크마다 안전한 중간 저장
-                self.logger.info(f"청크 {i+1}/{num_chunks} Google Sheets 안전 업데이트 중...")
+                # 백업된 선택자 복원 (다른 청크에서 찾은 선택자들 보존)
+                if hasattr(self, 'existing_selectors_backup') and 'selector' in df_config.columns:
+                    restored_count = 0
+                    for idx, row in df_config.iterrows():
+                        company_name = row.get('회사_한글_이름', '')
+                        if company_name in self.existing_selectors_backup:
+                            current_selector = str(row.get('selector', '')).strip()
+                            backup_selector = self.existing_selectors_backup[company_name]
+                            # 현재 선택자가 비어있고 백업에 있으면 복원
+                            if not current_selector and backup_selector:
+                                df_config.at[idx, 'selector'] = backup_selector
+                                restored_count += 1
+                    if restored_count > 0:
+                        self.logger.info(f"백업된 선택자 {restored_count}개 복원 완료")
+
+                # 새로 찾은 선택자들을 백업에 추가 (다음 청크에서 사용)
+                if hasattr(self, 'existing_selectors_backup') and 'selector' in df_config.columns:
+                    new_selectors_count = 0
+                    for idx, row in df_config.iterrows():
+                        company_name = row.get('회사_한글_이름', '')
+                        current_selector = str(row.get('selector', '')).strip()
+                        if company_name and current_selector and company_name not in self.existing_selectors_backup:
+                            self.existing_selectors_backup[company_name] = current_selector
+                            new_selectors_count += 1
+                    if new_selectors_count > 0:
+                        self.logger.info(f"새 선택자 {new_selectors_count}개를 백업에 추가")
+
+                # 100개 청크마다 선택자만 선택적 업데이트 (전체 덮어쓰기 방지)
+                # 업데이트할 선택자가 있는지 먼저 확인
+                selectors_to_update = 0
+                for idx, row in df_config.iterrows():
+                    if pd.notna(row.get('selector')) and str(row.get('selector')).strip():
+                        selectors_to_update += 1
+
+                self.logger.info(f"청크 {i+1}/{num_chunks} 선택자 업데이트 중... (업데이트 대상: {selectors_to_update}개)")
+
                 try:
-                    # 헤더를 유지하면서 데이터만 업데이트
-                    self.sheet_manager.safe_update_rows(df_config, self.worksheet_name)
-                    self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 시트 안전 업데이트 완료 (총 {len(df_config)} 회사)")
+                    # 선택자 컬럼만 업데이트하여 다른 데이터 보존
+                    self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
+                    self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 선택자 업데이트 완료")
                 except Exception as e:
-                    self.logger.error(f"❌ 청크 {i+1} 시트 업데이트 실패: {e}")
+                    self.logger.error(f"❌ 청크 {i+1} 선택자 업데이트 실패: {e}")
 
                 new_jobs_chunk, warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
 
@@ -166,9 +231,17 @@ class JobMonitoringDAG:
             if all_current_jobs:
                 self.save_jobs(all_current_jobs)
 
-            self.logger.info("모든 청크 처리 완료. Google Sheets에 변경 사항 업데이트 중...")
-            self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
-            self.logger.info("✅ Google Sheets 업데이트 완료")
+            self.logger.info("모든 청크 처리 완료. 최종 선택자 업데이트 중...")
+            try:
+                # 최종 업데이트도 선택자만 업데이트하여 다른 데이터 보존
+                self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
+                self.logger.info("✅ 최종 선택자 업데이트 완료")
+            except Exception as e:
+                self.logger.error(f"❌ 최종 선택자 업데이트 실패: {e}")
+                # 폴백으로 전체 업데이트 시도
+                self.logger.info("폴백으로 전체 시트 업데이트 시도...")
+                self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+                self.logger.info("✅ 폴백 업데이트 완료")
 
         else:
             original_df_config = df_config.copy()
@@ -317,16 +390,32 @@ class JobMonitoringDAG:
                 self.logger.info(f"  🔍 크롤링: {url[:50]}... → {len(company_list)}개 회사")
 
                 # 실제 크롤링
-                job_titles = self._crawl_single_url(url, representative_row)
+                result = self._crawl_single_url(url, representative_row)
 
-                if job_titles is not None:
-                    # 캐시에 저장
-                    self.url_crawling_cache[url] = job_titles
+                if result is not None:
+                    idx, found_selector, job_titles, error = result
 
-                    # 모든 관련 회사에 결과 적용
-                    for idx, company_name in company_list:
-                        current_jobs[company_name] = job_titles
-                        self.company_urls[company_name] = url
+                    if error is None and job_titles is not None:
+                        # 캐시에 저장
+                        self.url_crawling_cache[url] = job_titles
+
+                        # 찾은 선택자를 DataFrame에 저장
+                        if found_selector:
+                            for company_idx, company_name in company_list:
+                                if company_idx in df.index:
+                                    old_selector = df.loc[company_idx, 'selector']
+                                    if pd.isna(old_selector) or str(old_selector).strip() == '':
+                                        df.loc[company_idx, 'selector'] = found_selector
+                                        self.logger.info(f"📝 새 선택자 저장: {company_name} = '{found_selector}'")
+
+                        # 모든 관련 회사에 결과 적용
+                        for idx, company_name in company_list:
+                            current_jobs[company_name] = job_titles
+                            self.company_urls[company_name] = url
+                    else:
+                        # 크롤링 실패 처리
+                        if error:
+                            failed_companies.append(error)
                 else:
                     # 크롤링 실패
                     for idx, company_name in company_list:
@@ -344,11 +433,16 @@ class JobMonitoringDAG:
 
         return df, current_jobs, failed_companies
 
-    def _crawl_single_url(self, url: str, representative_row: pd.Series) -> Optional[List[str]]:
-        """단일 URL 크롤링"""
+    def _crawl_single_url(self, url: str, representative_row: pd.Series) -> Optional[tuple]:
+        """단일 URL 크롤링 (선택자 찾기 포함)"""
         company_name = representative_row['회사_한글_이름']
         use_selenium = representative_row['selenium_required']
+        # stabilize_selectors에서 이미 original_selector -> selector 변환됨
         selector = representative_row.get('selector', '')
+        index = representative_row.name  # DataFrame의 인덱스
+
+        # 디버깅: 선택자 값 확인
+        self.logger.info(f"  - {company_name} 기존 선택자 확인: '{selector}' (타입: {type(selector)})")
 
         html_content = self.get_html_content_for_crawling(url, use_selenium)
         if not html_content:
@@ -356,24 +450,48 @@ class JobMonitoringDAG:
 
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
+            found_selector = None
 
-            # 선택자가 없으면 기본 처리 (간단화)
+            # 선택자가 없거나 빈 경우 새로 찾기
             if not selector or selector.strip() == '':
-                selector = "a"  # 기본 선택자
+                self.logger.info(f"  - {company_name} 선택자 찾기 중...")
+
+                # 기존 선택자들 활용 시도
+                found_selector = self._try_existing_selectors(soup, [], company_name)
+
+                if found_selector:
+                    selector = found_selector
+                    self.logger.info(f"  - 기존 선택자 적용 성공: {selector}")
+                else:
+                    # 새 선택자 찾기
+                    best_selector, _ = self.selector_analyzer.find_best_selector(soup)
+                    if best_selector:
+                        selector = best_selector
+                        found_selector = best_selector
+                        self.logger.info(f"  - 새 선택자 찾기 성공: {selector}")
+                    else:
+                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패")
+                        return index, None, [], {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url}
+            else:
+                self.logger.info(f"  - 기존 선택자 사용: {selector}")
 
             postings = soup.select(selector)
             if not postings:
-                return []
+                return index, found_selector, [], {'company': company_name, 'reason': f'선택자 \'{selector}\'로 공고를 찾지 못함', 'url': url}
 
             job_titles = [elem.get_text(strip=True) for elem in postings if elem.get_text(strip=True)]
             job_titles = [title for title in job_titles if len(title) > 2 and len(title) < 200]
             job_titles = list(set(job_titles))  # 중복 제거
 
-            return job_titles
+            if job_titles:
+                self.logger.info(f"  - 성공: {len(job_titles)}개 공고 수집")
+                return index, found_selector, job_titles, None
+            else:
+                return index, found_selector, [], {'company': company_name, 'reason': '유효한 공고를 찾지 못함', 'url': url}
 
         except Exception as e:
             self.logger.error(f"  - {company_name} 크롤링 오류: {e}")
-            return None
+            return index, None, [], {'company': company_name, 'reason': f'처리 중 오류: {e}', 'url': url}
 
     def _load_foreign_keywords(self):
         """외국인_공고_키워드 시트에서 키워드들을 로드합니다."""
