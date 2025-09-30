@@ -479,12 +479,19 @@ class JobMonitoringDAG:
             else:
                 merged.append((current_start, current_end))
 
-        # 4단계: 볼드 처리된 새로운 문자열 생성
+        # 4단계: 볼드 처리된 새로운 문자열 생성 (공백 추가로 마크다운 충돌 방지)
         highlighted_title = ""
         last_index = 0
         for start, end in merged:
             highlighted_title += job_title[last_index:start]
-            highlighted_title += f"*{job_title[start:end]}*"
+            # 앞뒤 문자가 문자인 경우 공백 추가
+            need_space_before = start > 0 and job_title[start-1].isalnum()
+            need_space_after = end < len(job_title) and job_title[end].isalnum()
+
+            space_before = " " if need_space_before else ""
+            space_after = " " if need_space_after else ""
+
+            highlighted_title += f"{space_before}*{job_title[start:end]}*{space_after}"
             last_index = end
         highlighted_title += job_title[last_index:]
 
@@ -1422,7 +1429,7 @@ class JobMonitoringDAG:
 
             chunk_str = f"({chunk_info}) " if chunk_info else ""
             summary = " | ".join(summary_parts)
-            header = f":robot_face: **채용공고 모니터링 결과** {chunk_str}({current_time})\n*{summary}*"
+            header = f":robot_face: *채용공고 모니터링 결과* {chunk_str}({current_time})\n*{summary}*"
 
             # 1. 새로운 공고 섹션
             if new_jobs:
@@ -1552,19 +1559,24 @@ class JobMonitoringDAG:
                             page_content_with_footer = page_content
                     elif i == len(pages) - 1:
                         # 마지막 페이지
-                        page_header = f"{header}"
+                        page_header = ""
                         page_content_with_footer = f"{page_content}\n\n:white_check_mark: *전체 결과 끝* *({i+1}/{len(pages)})*"
                     else:
                         # 중간 페이지
-                        page_header = f"{header}"
+                        page_header = ""
                         page_footer = f"\n\n*({i+1}/{len(pages)})*"
                         page_content_with_footer = page_content + page_footer
 
-                    blocks = [
-                        {"type": "section", "text": {"type": "mrkdwn", "text": page_header}},
-                        {"type": "divider"},
-                        {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
-                    ]
+                    if page_header:
+                        blocks = [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": page_header}},
+                            {"type": "divider"},
+                            {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
+                        ]
+                    else:
+                        blocks = [
+                            {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
+                        ]
                     payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
                     send_payload(payload)
 
