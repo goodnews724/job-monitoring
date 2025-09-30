@@ -1545,19 +1545,19 @@ class JobMonitoringDAG:
                         # 첫 번째 페이지
                         if len(pages) > 1:
                             page_header = f"{header}"
-                            page_footer = f"\n\n*계속... ({i+1}/{len(pages)})*"
+                            page_footer = f"\n\n*({i+1}/{len(pages)})*"
                             page_content_with_footer = page_content + page_footer
                         else:
                             page_header = header
                             page_content_with_footer = page_content
                     elif i == len(pages) - 1:
                         # 마지막 페이지
-                        page_header = f"*...이어서 ({i+1}/{len(pages)})*"
-                        page_content_with_footer = f"{page_content}\n\n:white_check_mark: *전체 결과 끝*"
+                        page_header = f"{header}"
+                        page_content_with_footer = f"{page_content}\n\n:white_check_mark: *전체 결과 끝* *({i+1}/{len(pages)})*"
                     else:
                         # 중간 페이지
-                        page_header = f"*...이어서 ({i+1}/{len(pages)})*"
-                        page_footer = f"\n\n*계속... ({i+1}/{len(pages)})*"
+                        page_header = f"{header}"
+                        page_footer = f"\n\n*({i+1}/{len(pages)})*"
                         page_content_with_footer = page_content + page_footer
 
                     blocks = [
