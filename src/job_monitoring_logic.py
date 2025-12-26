@@ -210,8 +210,8 @@ class JobMonitoringDAG:
 
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
                 if i < num_chunks - 1:
-                    self.logger.info(f"다음 청크 처리를 위해 2분간 대기합니다.")
-                    time.sleep(120)
+                    self.logger.info(f"다음 청크 처리를 위해 1분간 대기합니다. (2분 -> 1분 최적화)")
+                    time.sleep(60)  # 120초 -> 60초로 단축
 
             # 전체 URL 그룹 기반으로 슬랙 메시지 최적화
             self.url_groups_for_notification = self._prepare_global_url_groups_for_notification(all_current_jobs)
@@ -679,7 +679,7 @@ class JobMonitoringDAG:
             return index, None, None, {'company': company_name, 'reason': f'처리 중 오류: {e}', 'url': url}
 
     def process_companies_integrated(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, List]:
-        """전처리와 크롤링을 한번에 통합 처리"""
+        """전처리와 크롤링을 한번에 통합 처리 (Playwright 브라우저 재사용 최적화)"""
         self.logger.info(f"통합 처리 대상: {len(df)}개 회사")
 
         # 메모리 사용량 체크
@@ -719,41 +719,62 @@ class JobMonitoringDAG:
             duplicate_savings = len(companies_to_process) - len(url_groups)
             self.logger.info(f"중복 URL 최적화: {len(companies_to_process)}개 회사 → {len(url_groups)}개 URL로 그룹화 (크롤링 {duplicate_savings}회 절약)")
 
-        # 5. URL별 통합 처리 (선택자 찾기 + 크롤링)
+        # 5. URL별 통합 처리 (선택자 찾기 + 크롤링) - Playwright 브라우저 재사용
         current_jobs = {}
         failed_companies = []
         url_results_cache = {}  # URL별 크롤링 결과 캐시
 
-        # URL별 순차 처리
-        results = []
-        processed_count = 0
-        total_urls = len(url_groups)
+        # ⭐ Playwright 브라우저 한 번만 생성 (재사용 구조)
+        playwright, browser = None, None
+        try:
+            playwright, browser = self.create_playwright_browser()
+            if playwright and browser:
+                self.logger.info("✅ Playwright 브라우저 생성 완료 - 전체 크롤링에 재사용합니다")
 
-        for url, company_indices in url_groups.items():
-            processed_count += 1
-            # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
-            representative_idx = self._select_representative_company(companies_to_process, company_indices)
-            representative_row = companies_to_process.loc[representative_idx]
-            is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
-            url_args = (representative_idx, representative_row, existing_selectors, url, is_shared)
+            # URL별 순차 처리
+            results = []
+            processed_count = 0
+            total_urls = len(url_groups)
 
-            # 진행 상황 로그
-            self.logger.info(f"🔄 진행 상황: {processed_count}/{total_urls} ({processed_count/total_urls*100:.1f}%)")
+            for url, company_indices in url_groups.items():
+                processed_count += 1
+                # 각 URL 그룹에서 가장 완전한 정보를 가진 회사를 대표로 선택
+                representative_idx = self._select_representative_company(companies_to_process, company_indices)
+                representative_row = companies_to_process.loc[representative_idx]
+                is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
+                url_args = (representative_idx, representative_row, existing_selectors, url, is_shared, browser)  # browser 전달
 
-            # URL별 크롤링 실행
-            result = self._process_url_with_companies(url_args)
-            results.append(result)
+                # 진행 상황 로그
+                self.logger.info(f"🔄 진행 상황: {processed_count}/{total_urls} ({processed_count/total_urls*100:.1f}%)")
 
-            # 10개마다 메모리 체크 및 쿨다운
-            if processed_count % 10 == 0:
-                import psutil
-                memory_percent = psutil.virtual_memory().percent
-                self.logger.info(f"📊 메모리 사용률: {memory_percent:.1f}%")
-                if memory_percent > 85:
-                    self.logger.warning("⚠️ 메모리 부족 - 10초 대기")
-                    time.sleep(10)
-                else:
-                    time.sleep(1)  # 일반적인 쿨다운
+                # URL별 크롤링 실행 (브라우저 재사용)
+                result = self._process_url_with_companies(url_args)
+                results.append(result)
+
+                # 10개마다 메모리 체크 및 쿨다운
+                if processed_count % 10 == 0:
+                    import psutil
+                    memory_percent = psutil.virtual_memory().percent
+                    self.logger.info(f"📊 메모리 사용률: {memory_percent:.1f}%")
+                    if memory_percent > 85:
+                        self.logger.warning("⚠️ 메모리 부족 - 5초 대기")
+                        time.sleep(5)  # 10초 -> 5초로 단축
+                    else:
+                        time.sleep(0.5)  # 1초 -> 0.5초로 단축
+
+        finally:
+            # 모든 크롤링 완료 후 브라우저 종료
+            if browser:
+                try:
+                    browser.close()
+                    self.logger.info("✅ Playwright 브라우저 종료 완료")
+                except:
+                    pass
+            if playwright:
+                try:
+                    playwright.stop()
+                except:
+                    pass
 
         for url, result_selector, job_titles, error_info in results:
                 url_results_cache[url] = {
@@ -912,8 +933,8 @@ class JobMonitoringDAG:
         return company_indices[0]
 
     def _process_url_with_companies(self, args):
-        """URL별로 크롤링을 수행합니다 (기존 _process_company_complete 기반)."""
-        index, row, existing_selectors, url, is_shared = args
+        """URL별로 크롤링을 수행합니다 (Playwright 브라우저 재사용)."""
+        index, row, existing_selectors, url, is_shared, browser = args  # browser 추가
         company_name = row['회사_한글_이름']
         selector = row.get('selector', '')
         use_selenium = row['selenium_required']
@@ -922,7 +943,8 @@ class JobMonitoringDAG:
         self.logger.info(f"- {company_name} URL 처리 중... ({url_type})")
         self.company_urls[company_name] = url
 
-        html_content = self.get_html_content_for_crawling(url, use_selenium)
+        # 브라우저 재사용하여 HTML 가져오기
+        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, browser)
 
         if not html_content:
             self.logger.error(f"  - HTML 가져오기 실패: {company_name} (selenium_required를 -1로 설정)")
@@ -1251,8 +1273,132 @@ class JobMonitoringDAG:
                     self.logger.error(f"HTML 가져오기 실패: {url}, 오류: {e}")
                     return None
 
+    def get_html_content_for_crawling_with_browser(self, url, use_selenium, browser=None, selector=None):
+        """실제 크롤링용 HTML 가져오기 (Playwright 브라우저 재사용)"""
+        import signal
+
+        def timeout_handler(signum, frame):
+            raise TimeoutError("크롤링 타임아웃")
+
+        try:
+            # 개별 URL 크롤링에 3분 타임아웃 설정 (5분 -> 3분 단축)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(180)  # 3분
+
+            if not use_selenium:
+                # 더 현실적인 브라우저 헤더 사용
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
+                    'Referer': url
+                }
+                response = requests.get(url, headers=headers, timeout=20, verify=False)
+                response.raise_for_status()
+                self.logger.debug(f"HTTP 요청 성공: {url} (응답 코드: {response.status_code})")
+                return response.text
+            else:
+                # ⭐ 브라우저가 전달되었으면 재사용, 없으면 새로 생성
+                should_close_browser = False
+                if not browser:
+                    playwright, browser = self.create_playwright_browser()
+                    should_close_browser = True
+                    if not browser:
+                        raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
+
+                try:
+                    max_retries = 2
+                    page = None
+                    for attempt in range(max_retries):
+                        try:
+                            page = browser.new_page()  # 페이지만 새로 생성 (브라우저 재사용)
+                            page.set_extra_http_headers({"Accept-Encoding": "gzip"})
+                            page.goto(url, timeout=15000)  # 타임아웃 유지
+
+                            if selector:
+                                try:
+                                    page.wait_for_selector(selector, timeout=10000)
+                                    time.sleep(1)  # 2초 -> 1초 단축
+                                except Exception:
+                                    self.logger.warning(f"선택자 '{selector}' 요소를 기다리는 데 실패했습니다.")
+                            else:
+                                time.sleep(2)  # 3초 -> 2초 단축
+
+                            html_content = page.content()
+                            return html_content
+
+                        except Exception as e:
+                            error_msg = str(e).lower()
+                            if ("timeout" in error_msg or "target" in error_msg) and attempt < max_retries - 1:
+                                self.logger.warning(f"페이지 처리 오류 ({attempt + 1}/{max_retries}): {url} - {type(e).__name__} - 재시도 중...")
+                                if page:
+                                    try:
+                                        page.close()
+                                    except:
+                                        pass
+                                time.sleep(2)  # 3초 -> 2초 단축
+                                continue
+                            else:
+                                raise e
+                        finally:
+                            if page:
+                                try:
+                                    page.close()  # 페이지만 닫기 (브라우저는 유지)
+                                except:
+                                    pass
+
+                    raise Exception("모든 재시도 실패")
+
+                finally:
+                    # ⭐ 직접 생성한 브라우저만 닫기
+                    if should_close_browser:
+                        try:
+                            if browser:
+                                browser.close()
+                            if 'playwright' in locals():
+                                playwright.stop()
+                        except:
+                            pass
+
+        except requests.exceptions.Timeout as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (타임아웃): {url} - {str(e)}")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (연결 오류): {url} - {str(e)}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (HTTP {e.response.status_code}): {url} - {str(e)}")
+            return None
+        except requests.exceptions.SSLError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (SSL 오류): {url} - {str(e)}")
+            return None
+        except TimeoutError as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (타임아웃): {url} - {str(e)}")
+            return None
+        except Exception as e:
+            self.logger.error(f"크롤링용 HTML 가져오기 실패 (기타 오류): {url} - {type(e).__name__}: {str(e)}")
+            return None
+        finally:
+            try:
+                signal.alarm(0)
+            except:
+                pass
+
     def get_html_content_for_crawling(self, url, use_selenium, selector=None):
-        """실제 크롤링용 HTML 가져오기 메서드 (Playwright 사용)"""
+        """실제 크롤링용 HTML 가져오기 메서드 (하위 호환성 유지)"""
+        return self.get_html_content_for_crawling_with_browser(url, use_selenium, None, selector)
+
+    def get_html_content_for_crawling_old(self, url, use_selenium, selector=None):
+        """[DEPRECATED] 실제 크롤링용 HTML 가져오기 메서드 (Playwright 매번 생성 - 사용 안 함)"""
         import signal
 
         def timeout_handler(signum, frame):
