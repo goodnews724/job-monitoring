@@ -333,7 +333,7 @@ class JobMonitoringDAG:
         return notification_groups
 
     def process_companies_with_cache(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict, List]:
-        """캐시를 활용한 통합 처리 (URL별 크롤링 최적화)"""
+        """캐시를 활용한 통합 처리 (Playwright 브라우저 재사용 최적화)"""
         self.logger.info(f"캐시 활용 통합 처리 대상: {len(df)}개 회사")
 
         # 기본 전처리
@@ -369,69 +369,145 @@ class JobMonitoringDAG:
                 url_company_map[url] = []
             url_company_map[url].append((idx, company_name))
 
-        # URL별 처리 (캐시 활용)
-        for url, company_list in url_company_map.items():
-            if url in self.url_crawling_cache:
-                # 캐시 히트
-                cache_hits += len(company_list)
-                job_titles = self.url_crawling_cache[url]
+        # Playwright 브라우저 한 번만 생성 (재사용)
+        playwright, browser = None, None
+        try:
+            playwright, browser = self.create_playwright_browser()
+            if playwright and browser:
+                self.logger.info("Playwright 브라우저 생성 완료 - 전체 크롤링에 재사용합니다")
 
-                for idx, company_name in company_list:
-                    current_jobs[company_name] = job_titles
-                    self.company_urls[company_name] = url
+            # URL별 처리 (캐시 활용)
+            for url, company_list in url_company_map.items():
+                if url in self.url_crawling_cache:
+                    # 캐시 히트
+                    cache_hits += len(company_list)
+                    job_titles = self.url_crawling_cache[url]
 
-                self.logger.info(f"  ✅ 캐시 사용: {url[:50]}... → {len(company_list)}개 회사 ({len(job_titles)}개 공고)")
-            else:
-                # 캐시 미스 - 크롤링 수행
-                cache_misses += len(company_list)
-                representative_idx, representative_company = company_list[0]
-                representative_row = companies_to_process.loc[representative_idx]
-
-                self.logger.info(f"  🔍 크롤링: {url[:50]}... → {len(company_list)}개 회사")
-
-                # 실제 크롤링
-                result = self._crawl_single_url(url, representative_row)
-
-                if result is not None:
-                    idx, found_selector, job_titles, error = result
-
-                    if error is None and job_titles is not None:
-                        # 캐시에 저장
-                        self.url_crawling_cache[url] = job_titles
-
-                        # 찾은 선택자를 DataFrame에 저장
-                        if found_selector:
-                            for company_idx, company_name in company_list:
-                                if company_idx in df.index:
-                                    old_selector = df.loc[company_idx, 'selector']
-                                    if pd.isna(old_selector) or str(old_selector).strip() == '':
-                                        df.loc[company_idx, 'selector'] = found_selector
-                                        self.logger.info(f"📝 새 선택자 저장: {company_name} = '{found_selector}'")
-
-                        # 모든 관련 회사에 결과 적용
-                        for idx, company_name in company_list:
-                            current_jobs[company_name] = job_titles
-                            self.company_urls[company_name] = url
-                    else:
-                        # 크롤링 실패 처리
-                        if error:
-                            failed_companies.append(error)
-                else:
-                    # 크롤링 실패
                     for idx, company_name in company_list:
-                        failed_companies.append({
-                            'company': company_name,
-                            'reason': 'HTML 가져오기 실패',
-                            'url': url
-                        })
+                        current_jobs[company_name] = job_titles
+                        self.company_urls[company_name] = url
 
-        self.logger.info(f"🚀 성능 개선 효과: 캐시 히트 {cache_hits}개, 새 크롤링 {len(url_company_map)}개 URL")
+                    self.logger.info(f"  캐시 사용: {url[:50]}... -> {len(company_list)}개 회사 ({len(job_titles)}개 공고)")
+                else:
+                    # 캐시 미스 - 크롤링 수행
+                    cache_misses += len(company_list)
+                    representative_idx, representative_company = company_list[0]
+                    representative_row = companies_to_process.loc[representative_idx]
+
+                    self.logger.info(f"  크롤링: {url[:50]}... -> {len(company_list)}개 회사")
+
+                    # 실제 크롤링 (브라우저 재사용)
+                    result = self._crawl_single_url_with_browser(url, representative_row, browser)
+
+                    if result is not None:
+                        idx, found_selector, job_titles, error = result
+
+                        if error is None and job_titles is not None:
+                            # 캐시에 저장
+                            self.url_crawling_cache[url] = job_titles
+
+                            # 찾은 선택자를 DataFrame에 저장
+                            if found_selector:
+                                for company_idx, company_name in company_list:
+                                    if company_idx in df.index:
+                                        old_selector = df.loc[company_idx, 'selector']
+                                        if pd.isna(old_selector) or str(old_selector).strip() == '':
+                                            df.loc[company_idx, 'selector'] = found_selector
+                                            self.logger.info(f"새 선택자 저장: {company_name} = '{found_selector}'")
+
+                            # 모든 관련 회사에 결과 적용
+                            for idx, company_name in company_list:
+                                current_jobs[company_name] = job_titles
+                                self.company_urls[company_name] = url
+                        else:
+                            # 크롤링 실패 처리
+                            if error:
+                                failed_companies.append(error)
+                    else:
+                        # 크롤링 실패
+                        for idx, company_name in company_list:
+                            failed_companies.append({
+                                'company': company_name,
+                                'reason': 'HTML 가져오기 실패',
+                                'url': url
+                            })
+
+        finally:
+            # 모든 크롤링 완료 후 브라우저 종료
+            if browser:
+                try:
+                    browser.close()
+                    self.logger.info("Playwright 브라우저 종료 완료")
+                except Exception as e:
+                    self.logger.warning(f"브라우저 종료 중 오류: {e}")
+            if playwright:
+                try:
+                    playwright.stop()
+                except Exception as e:
+                    self.logger.warning(f"Playwright 중지 중 오류: {e}")
+
+        self.logger.info(f"성능 개선 효과: 캐시 히트 {cache_hits}개, 새 크롤링 {len(url_company_map)}개 URL")
         if cache_hits > 0:
             total_requests = cache_hits + len(url_company_map)
             saved_percentage = (cache_hits / total_requests) * 100
             self.logger.info(f"   절약된 크롤링: {cache_hits}회 ({saved_percentage:.1f}%)")
 
         return df, current_jobs, failed_companies
+
+    def _crawl_single_url_with_browser(self, url: str, representative_row: pd.Series, browser=None) -> Optional[tuple]:
+        """단일 URL 크롤링 (선택자 찾기 포함, 브라우저 재사용 버전)"""
+        company_name = representative_row['회사_한글_이름']
+        use_selenium = representative_row['selenium_required']
+        selector = representative_row.get('selector', '')
+        index = representative_row.name
+
+        self.logger.info(f"  - {company_name} 기존 선택자 확인: '{selector}' (타입: {type(selector)})")
+
+        # 브라우저 재사용
+        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, browser)
+        if not html_content:
+            return None
+
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            found_selector = None
+
+            if not selector or selector.strip() == '':
+                self.logger.info(f"  - {company_name} 선택자 찾기 중...")
+
+                found_selector = self._try_existing_selectors(soup, [], company_name)
+
+                if found_selector:
+                    selector = found_selector
+                    self.logger.info(f"  - 기존 선택자 적용 성공: {selector}")
+                else:
+                    best_selector, _ = self.selector_analyzer.find_best_selector(soup)
+                    if best_selector:
+                        selector = best_selector
+                        found_selector = best_selector
+                        self.logger.info(f"  - 새 선택자 찾기 성공: {selector}")
+                    else:
+                        self.logger.warning(f"  - {company_name} 선택자 찾기 실패")
+                        return index, None, [], {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url}
+            else:
+                self.logger.info(f"  - 기존 선택자 사용: {selector}")
+
+            postings = soup.select(selector)
+            if not postings:
+                return index, selector, None, {'company': company_name, 'reason': f'선택자 \'{selector}\'로 공고를 찾지 못함', 'url': url}
+
+            all_texts = [post.get_text(strip=True) for post in postings if post.get_text(strip=True).strip()]
+            job_titles = {text for text in all_texts if self.selector_analyzer._is_potential_job_posting(text)}
+
+            if job_titles:
+                self.logger.info(f"  - 성공: {len(job_titles)}개 공고 수집")
+                return index, found_selector, job_titles, None
+            else:
+                return index, selector, None, {'company': company_name, 'reason': '유효한 공고를 찾지 못함', 'url': url}
+
+        except Exception as e:
+            self.logger.error(f"  - {company_name} 처리 중 오류 발생: {e}")
+            return index, None, None, {'company': company_name, 'reason': f'처리 중 오류: {e}', 'url': url}
 
     def _crawl_single_url(self, url: str, representative_row: pd.Series) -> Optional[tuple]:
         """단일 URL 크롤링 (선택자 찾기 포함)"""
