@@ -47,6 +47,7 @@ with DAG(
     schedule_interval='0 10,15 * * *',  # 매일 10시, 15시 (KST)
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
     catchup=False,
+    max_active_runs=1,  # 동시 실행 방지
     is_paused_upon_creation=True,  # 생성 시 일시정지 상태
 ) as dag:
     run_task = PythonOperator(
@@ -54,16 +55,24 @@ with DAG(
         python_callable=run_job_monitoring,
     )
 
-# 5000대 기업 DAG - 매일 오전 10시와 오후 3시 실행 (한국시간, 1시간 실행시간 고려)
+# 5000대 기업 DAG 전용 설정
+top5000_args = default_args.copy()
+top5000_args.update({
+    'depends_on_past': True,  # 이전 실행 성공해야 다음 실행 가능
+})
+
+# 5000대 기업 DAG - 매일 19시 실행
 with DAG(
     'top5000_company_monitoring_dag',
-    default_args=default_args,
+    default_args=top5000_args,
     schedule_interval='0 19 * * *',  # 매일 19시 (KST)
     start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
     catchup=False,
+    max_active_runs=1,  # 동시 실행 방지
     is_paused_upon_creation=True,  # 생성 시 일시정지 상태
 ) as top5000_dag:
     run_top5000_task = PythonOperator(
         task_id='run_top5000_monitoring',
         python_callable=run_top5000_monitoring,
+        execution_timeout=timedelta(hours=14),  # 14시간 초과 시 강제 종료 (다음 일반 DAG 10시 전 09시까지)
     )
