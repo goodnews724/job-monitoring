@@ -1357,9 +1357,18 @@ class JobMonitoringDAG:
             raise TimeoutError("크롤링 타임아웃")
 
         try:
-            # 개별 URL 크롤링에 3분 타임아웃 설정 (5분 -> 3분 단축)
+            # URL별 타임아웃 설정
+            if 'toss.im' in url:
+                timeout_seconds = 180  # toss.im: 3분
+                page_timeout = 60000  # 60초
+                wait_time = 3
+            else:
+                timeout_seconds = 60   # 나머지: 1분
+                page_timeout = 20000   # 20초
+                wait_time = 1
+
             signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(180)  # 3분
+            signal.alarm(timeout_seconds)
 
             if not use_selenium:
                 # 더 현실적인 브라우저 헤더 사용
@@ -1398,16 +1407,16 @@ class JobMonitoringDAG:
                         try:
                             page = browser.new_page()  # 페이지만 새로 생성 (브라우저 재사용)
                             page.set_extra_http_headers({"Accept-Encoding": "gzip"})
-                            page.goto(url, timeout=15000)  # 타임아웃 유지
+                            page.goto(url, timeout=page_timeout)  # URL별 타임아웃
 
                             if selector:
                                 try:
-                                    page.wait_for_selector(selector, timeout=10000)
-                                    time.sleep(1)  # 2초 -> 1초 단축
+                                    page.wait_for_selector(selector, timeout=page_timeout // 2)
+                                    time.sleep(wait_time)
                                 except Exception:
                                     self.logger.warning(f"선택자 '{selector}' 요소를 기다리는 데 실패했습니다.")
                             else:
-                                time.sleep(2)  # 3초 -> 2초 단축
+                                time.sleep(wait_time)
 
                             html_content = page.content()
                             return html_content
@@ -1421,7 +1430,7 @@ class JobMonitoringDAG:
                                         page.close()
                                     except:
                                         pass
-                                time.sleep(2)  # 3초 -> 2초 단축
+                                time.sleep(wait_time)  # URL별 대기 시간
                                 continue
                             else:
                                 raise e
