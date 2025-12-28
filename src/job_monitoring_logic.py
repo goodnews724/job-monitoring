@@ -17,13 +17,14 @@ from utils import stabilize_selector, SeleniumRequirementChecker
 load_dotenv()
 
 class JobMonitoringDAG:
-    def __init__(self, base_dir: str, worksheet_name: str = '[등록]채용홈페이지 모음', webhook_url_env: str = 'SLACK_WEBHOOK_URL', results_filename: str = 'job_postings_latest.csv'):
+    def __init__(self, base_dir: str, worksheet_name: str = '[등록]채용홈페이지 모음', webhook_url_env: str = 'SLACK_WEBHOOK_URL', results_filename: str = 'job_postings_latest.csv', limit: Optional[int] = None):
         self.base_dir = base_dir
         self.data_dir = os.path.join(base_dir, 'data')
         self.worksheet_name = worksheet_name
         self.webhook_url_env = webhook_url_env  # 환경변수 이름 저장
         self.results_path = os.path.join(self.data_dir, results_filename)
         self.webhook_url = os.getenv(webhook_url_env)
+        self.limit = limit
         self.company_urls = {}
         self.foreign_keywords = []  # 외국인 채용공고 키워드
         self.url_groups_for_notification = {}  # URL 그룹 정보 (슬랙 알림용)
@@ -87,6 +88,10 @@ class JobMonitoringDAG:
             self.logger.error(f"Google Sheets에서 설정 정보를 가져오지 못했습니다: {self.worksheet_name}")
             return
 
+        if self.limit:
+            self.logger.info(f"테스트 목적으로 {self.limit}개 기업만 처리합니다.")
+            df_config = df_config.head(self.limit)
+
         # 키워드 필터링이 필요한 시트 목록
         keyword_sheets = ['5000대_기업', '[등록]채용홈페이지 모음']
         if self.worksheet_name in keyword_sheets:
@@ -101,28 +106,11 @@ class JobMonitoringDAG:
             # 2. 안정화된 데이터로 처리 대상 필터링
             df_to_process = df_config[df_config['job_posting_url'].notna() & (df_config['job_posting_url'].str.strip() != '')].copy()
 
-            # 3. 청크 처리 전 기존 선택자 백업 (덮어쓰기 방지)
-            self.logger.info("청크 처리 전 기존 선택자 정보 백업 중...")
-            self.existing_selectors_backup = {}
-            if 'selector' in df_config.columns:
-                for idx, row in df_config.iterrows():
-                    if pd.notna(row.get('selector')) and str(row.get('selector')).strip():
-                        company_name = row.get('회사_한글_이름', '')
-                        if company_name:
-                            self.existing_selectors_backup[company_name] = str(row['selector']).strip()
-                self.logger.info(f"기존 선택자 {len(self.existing_selectors_backup)}개 백업 완료")
-
-            # 미리 전체 URL 그룹 파악
-            self.global_url_groups = self._analyze_global_url_groups(df_to_process)
-
             chunk_size = 100
             num_chunks = (len(df_to_process) - 1) // chunk_size + 1
             self.logger.info(f"'{self.worksheet_name}' 시트의 {len(df_to_process)}개 기업을 {num_chunks}개 청크로 분할하여 처리합니다.")
 
-            all_current_jobs = {}
-            all_new_jobs = {}
-            all_warnings = []
-            all_failed_companies = []
+            is_first_chunk = True
             list_of_df_chunks = [df_to_process.iloc[i:i+chunk_size] for i in range(0, len(df_to_process), chunk_size)]
 
             for i, df_chunk in enumerate(list_of_df_chunks):
@@ -131,117 +119,61 @@ class JobMonitoringDAG:
                 chunk_info = f"{start_num}-{end_num}번째 기업"
                 self.logger.info(f"--- 청크 처리 시작: {chunk_info} ({len(df_chunk)}개 기업) ---")
 
-                # 각 청크별로 통합 처리 (전처리 + 크롤링)
-                self.logger.info(f"청크 {i+1}/{num_chunks} 통합 처리 시작")
-                df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_with_cache(df_chunk)
+                # 1. 각 청크별로 통합 처리 (전처리 + 크롤링)
+                df_chunk_processed, current_jobs_chunk, failed_companies_chunk = self.process_companies_with_cache(df_chunk.copy())
 
-                # 전체 DataFrame에 업데이트 (인덱스 기반으로 올바르게)
-                updated_selectors_count = 0
+                # 2. DataFrame에 선택자 업데이트
                 for idx in df_chunk_processed.index:
-                    if idx in df_config.index:
-                        for col in df_chunk_processed.columns:
-                            old_value = df_config.loc[idx, col]
-                            new_value = df_chunk_processed.loc[idx, col]
-                            df_config.loc[idx, col] = new_value
-                            # 선택자가 업데이트된 경우 로깅
-                            if col == 'selector' and str(old_value).strip() != str(new_value).strip() and str(new_value).strip():
-                                company_name = df_config.loc[idx, '회사_한글_이름'] if '회사_한글_이름' in df_config.columns else f"인덱스_{idx}"
-                                self.logger.info(f"📝 선택자 업데이트: {company_name} = '{new_value}'")
-                                updated_selectors_count += 1
+                    if 'selector' in df_chunk_processed.columns and idx in df_config.index:
+                        new_selector = df_chunk_processed.loc[idx, 'selector']
+                        if pd.notna(new_selector) and str(new_selector).strip():
+                            df_config.loc[idx, 'selector'] = new_selector
+                
+                # 3. 청크별 결과 비교
+                new_jobs_chunk, warnings_chunk, failed_companies_for_notify = self.compare_and_notify(
+                    current_jobs_chunk,
+                    failed_companies_chunk,
+                    save=False,
+                    send_notifications=False
+                )
 
-                if updated_selectors_count > 0:
-                    self.logger.info(f"✅ 청크에서 총 {updated_selectors_count}개 선택자 업데이트됨")
+                # 4. 청크별 슬랙 알림 전송
+                if new_jobs_chunk or warnings_chunk or failed_companies_for_notify:
+                    self.logger.info(f"📤 청크 {i+1}/{num_chunks}에 대한 슬랙 알림 전송 중...")
+                    self.send_slack_notification(
+                        new_jobs_chunk,
+                        warnings_chunk,
+                        failed_companies_for_notify,
+                        chunk_info=chunk_info
+                    )
+                else:
+                    self.logger.info(f"✅ 청크 {i+1}/{num_chunks}에 새로운 내용이 없어 알림을 건너뜁니다.")
 
-                all_current_jobs.update(current_jobs_chunk)
+                # 5. 청크별 결과 파일에 증분 저장
+                if current_jobs_chunk:
+                    self.save_jobs_incrementally(current_jobs_chunk, append=not is_first_chunk)
+                    if is_first_chunk:
+                        is_first_chunk = False
 
-                # 백업된 선택자 복원 (다른 청크에서 찾은 선택자들 보존)
-                if hasattr(self, 'existing_selectors_backup') and 'selector' in df_config.columns:
-                    restored_count = 0
-                    for idx, row in df_config.iterrows():
-                        company_name = row.get('회사_한글_이름', '')
-                        if company_name in self.existing_selectors_backup:
-                            current_selector = str(row.get('selector', '')).strip()
-                            backup_selector = self.existing_selectors_backup[company_name]
-                            # 현재 선택자가 비어있고 백업에 있으면 복원
-                            if not current_selector and backup_selector:
-                                df_config.at[idx, 'selector'] = backup_selector
-                                restored_count += 1
-                    if restored_count > 0:
-                        self.logger.info(f"백업된 선택자 {restored_count}개 복원 완료")
-
-                # 새로 찾은 선택자들을 백업에 추가 (다음 청크에서 사용)
-                if hasattr(self, 'existing_selectors_backup') and 'selector' in df_config.columns:
-                    new_selectors_count = 0
-                    for idx, row in df_config.iterrows():
-                        company_name = row.get('회사_한글_이름', '')
-                        current_selector = str(row.get('selector', '')).strip()
-                        if company_name and current_selector and company_name not in self.existing_selectors_backup:
-                            self.existing_selectors_backup[company_name] = current_selector
-                            new_selectors_count += 1
-                    if new_selectors_count > 0:
-                        self.logger.info(f"새 선택자 {new_selectors_count}개를 백업에 추가")
-
-                # 100개 청크마다 선택자만 선택적 업데이트 (전체 덮어쓰기 방지)
-                # 업데이트할 선택자가 있는지 먼저 확인
-                selectors_to_update = 0
-                for idx, row in df_config.iterrows():
-                    if pd.notna(row.get('selector')) and str(row.get('selector')).strip():
-                        selectors_to_update += 1
-
-                self.logger.info(f"청크 {i+1}/{num_chunks} 선택자 업데이트 중... (업데이트 대상: {selectors_to_update}개)")
-
+                # 6. 구글 시트 선택자 업데이트
+                self.logger.info(f"청크 {i+1}/{num_chunks} 선택자 업데이트 중...")
                 try:
-                    # 선택자 컬럼만 업데이트하여 다른 데이터 보존
                     self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
                     self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 선택자 업데이트 완료")
                 except Exception as e:
                     self.logger.error(f"❌ 청크 {i+1} 선택자 업데이트 실패: {e}")
 
-                new_jobs_chunk, warnings, failed_companies = self.compare_and_notify(current_jobs_chunk, failed_companies_chunk, chunk_info=chunk_info, save=False, send_notifications=False)
-
-                self.logger.info(f"🔍 청크 {i+1} 결과 수집:")
-                self.logger.info(f"  - 새로운 공고: {len(new_jobs_chunk)}개 회사")
-                self.logger.info(f"  - 경고: {len(warnings)}개")
-                self.logger.info(f"  - 실패: {len(failed_companies)}개")
-
-                all_new_jobs.update(new_jobs_chunk)
-                all_warnings.extend(warnings)
-                all_failed_companies.extend(failed_companies)
-
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
                 if i < num_chunks - 1:
-                    self.logger.info(f"다음 청크 처리를 위해 1분간 대기합니다. (2분 -> 1분 최적화)")
-                    time.sleep(60)  # 120초 -> 60초로 단축
+                    self.logger.info(f"다음 청크 처리를 위해 30초간 대기합니다.")
+                    time.sleep(30)
 
-            # 전체 URL 그룹 기반으로 슬랙 메시지 최적화
-            self.url_groups_for_notification = self._prepare_global_url_groups_for_notification(all_current_jobs)
-
-            # 모든 청크 처리 완료 후 통합 알림 전송
-            self.logger.info(f"🔍 슬랙 알림 전송 조건 확인:")
-            self.logger.info(f"  - all_new_jobs: {len(all_new_jobs)}개 회사")
-            self.logger.info(f"  - all_warnings: {len(all_warnings)}개 경고")
-            self.logger.info(f"  - all_failed_companies: {len(all_failed_companies)}개 실패")
-
-            if all_new_jobs or all_warnings or all_failed_companies:
-                self.logger.info("📤 조건 만족! 통합 슬랙 알림 전송 중...")
-                self.send_slack_notification(all_new_jobs, all_warnings, all_failed_companies, chunk_info="전체 결과")
-            else:
-                self.logger.warning("⚠️ 슬랙 알림 전송 조건 불만족 - 전송할 내용 없음")
-
-            if all_current_jobs:
-                self.save_jobs(all_current_jobs)
-
-            self.logger.info("모든 청크 처리 완료. 최종 선택자 업데이트 중...")
+            self.logger.info("모든 청크 처리 완료. 최종 시트 업데이트 중...")
             try:
-                # 최종 업데이트도 선택자만 업데이트하여 다른 데이터 보존
-                self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
-                self.logger.info("✅ 최종 선택자 업데이트 완료")
-            except Exception as e:
-                self.logger.error(f"❌ 최종 선택자 업데이트 실패: {e}")
-                # 폴백으로 전체 업데이트 시도
-                self.logger.info("폴백으로 전체 시트 업데이트 시도...")
                 self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
-                self.logger.info("✅ 폴백 업데이트 완료")
+                self.logger.info("✅ 최종 시트 업데이트 완료")
+            except Exception as e:
+                self.logger.error(f"❌ 최종 시트 업데이트 실패: {e}")
 
         else:
             original_df_config = df_config.copy()
@@ -1703,6 +1635,44 @@ class JobMonitoringDAG:
                 self.logger.error(f"임시 파일 저장도 실패: {e2}")
         except Exception as e:
             self.logger.error(f"파일 저장 중 오류 발생: {e}")
+
+    def save_jobs_incrementally(self, current_jobs: Dict, append: bool):
+        """결과를 CSV 파일에 증분 저장합니다."""
+        kst = pytz.timezone('Asia/Seoul')
+        current_time_kst = datetime.now(kst)
+        all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
+
+        if not all_postings:
+            return
+
+        df_to_save = pd.DataFrame(all_postings)
+        mode = 'a' if append else 'w'
+        header = not append
+
+        try:
+            df_to_save.to_csv(self.results_path, mode=mode, header=header, index=False, encoding='utf-8-sig')
+            self.logger.info(f"결과를 '{self.results_path}'에 {'추가' if append else '저장'}했습니다. ({len(df_to_save)}개 항목)")
+        except Exception as e:
+            self.logger.error(f"파일 증분 저장 중 오류 발생: {e}")
+
+    def save_jobs_incrementally(self, current_jobs: Dict, append: bool):
+        """결과를 CSV 파일에 증분 저장합니다."""
+        kst = pytz.timezone('Asia/Seoul')
+        current_time_kst = datetime.now(kst)
+        all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
+
+        if not all_postings:
+            return
+
+        df_to_save = pd.DataFrame(all_postings)
+        mode = 'a' if append else 'w'
+        header = not append
+
+        try:
+            df_to_save.to_csv(self.results_path, mode=mode, header=header, index=False, encoding='utf-8-sig')
+            self.logger.info(f"결과를 '{self.results_path}'에 {'추가' if append else '저장'}했습니다. ({len(df_to_save)}개 항목)")
+        except Exception as e:
+            self.logger.error(f"파일 증분 저장 중 오류 발생: {e}")
 
     def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List, chunk_info: str = None):
         self.logger.info(f"🚀 send_slack_notification 호출됨:")

@@ -74,5 +74,5 @@ with DAG(
     run_top5000_task = PythonOperator(
         task_id='run_top5000_monitoring',
         python_callable=run_top5000_monitoring,
-        execution_timeout=timedelta(hours=7),  # 7시간 초과 시 강제 종료 (정상 5시간, 여유 2시간)
+        execution_timeout=timedelta(hours=10),  # 10시간 초과 시 강제 종료
     )
