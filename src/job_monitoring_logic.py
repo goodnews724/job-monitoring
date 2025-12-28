@@ -302,10 +302,10 @@ class JobMonitoringDAG:
             url_company_map[url].append((idx, company_name))
 
         # Playwright 브라우저 한 번만 생성 (재사용)
-        playwright, browser = None, None
+        playwright, browser, context = None, None, None
         try:
-            playwright, browser = self.create_playwright_browser()
-            if playwright and browser:
+            playwright, browser, context = self.create_playwright_browser()
+            if playwright and browser and context:
                 self.logger.info("Playwright 브라우저 생성 완료 - 전체 크롤링에 재사용합니다")
 
             # URL별 처리 (캐시 활용)
@@ -328,8 +328,8 @@ class JobMonitoringDAG:
 
                     self.logger.info(f"  크롤링: {url[:50]}... -> {len(company_list)}개 회사")
 
-                    # 실제 크롤링 (브라우저 재사용)
-                    result = self._crawl_single_url_with_browser(url, representative_row, browser)
+                    # 실제 크롤링 (컨텍스트 재사용)
+                    result = self._crawl_single_url_with_browser(url, representative_row, context)
 
                     if result is not None:
                         idx, found_selector, job_titles, error = result
@@ -366,6 +366,11 @@ class JobMonitoringDAG:
 
         finally:
             # 모든 크롤링 완료 후 브라우저 종료
+            if context:
+                try:
+                    context.close()
+                except Exception as e:
+                    self.logger.warning(f"컨텍스트 종료 중 오류: {e}")
             if browser:
                 try:
                     browser.close()
@@ -386,8 +391,8 @@ class JobMonitoringDAG:
 
         return df, current_jobs, failed_companies
 
-    def _crawl_single_url_with_browser(self, url: str, representative_row: pd.Series, browser=None) -> Optional[tuple]:
-        """단일 URL 크롤링 (선택자 찾기 포함, 브라우저 재사용 버전)"""
+    def _crawl_single_url_with_browser(self, url: str, representative_row: pd.Series, context=None) -> Optional[tuple]:
+        """단일 URL 크롤링 (선택자 찾기 포함, 컨텍스트 재사용 버전)"""
         company_name = representative_row['회사_한글_이름']
         use_selenium = representative_row['selenium_required']
         selector = representative_row.get('selector', '')
@@ -395,8 +400,8 @@ class JobMonitoringDAG:
 
         self.logger.info(f"  - {company_name} 기존 선택자 확인: '{selector}' (타입: {type(selector)})")
 
-        # 브라우저 재사용
-        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, browser)
+        # 컨텍스트 재사용
+        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, context)
         if not html_content:
             return None
 
@@ -733,10 +738,10 @@ class JobMonitoringDAG:
         url_results_cache = {}  # URL별 크롤링 결과 캐시
 
         # ⭐ Playwright 브라우저 한 번만 생성 (재사용 구조)
-        playwright, browser = None, None
+        playwright, browser, context = None, None, None
         try:
-            playwright, browser = self.create_playwright_browser()
-            if playwright and browser:
+            playwright, browser, context = self.create_playwright_browser()
+            if playwright and browser and context:
                 self.logger.info("✅ Playwright 브라우저 생성 완료 - 전체 크롤링에 재사용합니다")
 
             # URL별 순차 처리
@@ -750,7 +755,7 @@ class JobMonitoringDAG:
                 representative_idx = self._select_representative_company(companies_to_process, company_indices)
                 representative_row = companies_to_process.loc[representative_idx]
                 is_shared = len(company_indices) > 1  # 2개 이상 회사가 같은 URL 사용시 공유로 간주
-                url_args = (representative_idx, representative_row, existing_selectors, url, is_shared, browser)  # browser 전달
+                url_args = (representative_idx, representative_row, existing_selectors, url, is_shared, context)  # context 전달
 
                 # 진행 상황 로그
                 self.logger.info(f"🔄 진행 상황: {processed_count}/{total_urls} ({processed_count/total_urls*100:.1f}%)")
@@ -772,6 +777,11 @@ class JobMonitoringDAG:
 
         finally:
             # 모든 크롤링 완료 후 브라우저 종료
+            if context:
+                try:
+                    context.close()
+                except:
+                    pass
             if browser:
                 try:
                     browser.close()
@@ -941,8 +951,8 @@ class JobMonitoringDAG:
         return company_indices[0]
 
     def _process_url_with_companies(self, args):
-        """URL별로 크롤링을 수행합니다 (Playwright 브라우저 재사용)."""
-        index, row, existing_selectors, url, is_shared, browser = args  # browser 추가
+        """URL별로 크롤링을 수행합니다 (Playwright 컨텍스트 재사용)."""
+        index, row, existing_selectors, url, is_shared, context = args  # context 사용
         company_name = row['회사_한글_이름']
         selector = row.get('selector', '')
         use_selenium = row['selenium_required']
@@ -951,8 +961,8 @@ class JobMonitoringDAG:
         self.logger.info(f"- {company_name} URL 처리 중... ({url_type})")
         self.company_urls[company_name] = url
 
-        # 브라우저 재사용하여 HTML 가져오기
-        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, browser)
+        # 컨텍스트 재사용하여 HTML 가져오기
+        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, context)
 
         if not html_content:
             self.logger.error(f"  - HTML 가져오기 실패: {company_name} (selenium_required를 -1로 설정)")
@@ -1249,12 +1259,12 @@ class JobMonitoringDAG:
                     response.raise_for_status()
                     return response.text
                 else:
-                    playwright, browser = self.create_playwright_browser()
-                    if not playwright or not browser:
+                    playwright, browser, context = self.create_playwright_browser()
+                    if not playwright or not browser or not context:
                         raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
                     try:
-                        page = browser.new_page()
+                        page = context.new_page()
                         page.goto(url, timeout=20000)
 
                         if selector:
@@ -1269,6 +1279,7 @@ class JobMonitoringDAG:
                         html_content = page.content()
                         return html_content
                     finally:
+                        context.close()
                         browser.close()
                         playwright.stop()
 
@@ -1281,15 +1292,15 @@ class JobMonitoringDAG:
                     self.logger.error(f"HTML 가져오기 실패: {url}, 오류: {e}")
                     return None
 
-    def get_html_content_for_crawling_with_browser(self, url, use_selenium, browser=None, selector=None):
-        """실제 크롤링용 HTML 가져오기 (Playwright 브라우저 재사용)"""
+    def get_html_content_for_crawling_with_browser(self, url, use_selenium, context=None, selector=None):
+        """실제 크롤링용 HTML 가져오기 (Playwright 컨텍스트 재사용)"""
         import signal
 
         def timeout_handler(signum, frame):
             raise TimeoutError("크롤링 타임아웃")
 
         try:
-            # URL별 타임아웃 설정
+            # URL별 타임아웃 설정 (signal은 백업용, Playwright 자체 타임아웃이 우선)
             if 'toss.im' in url:
                 timeout_seconds = 180  # toss.im: 3분
                 page_timeout = 60000  # 60초
@@ -1324,12 +1335,13 @@ class JobMonitoringDAG:
                 self.logger.debug(f"HTTP 요청 성공: {url} (응답 코드: {response.status_code})")
                 return response.text
             else:
-                # ⭐ 브라우저가 전달되었으면 재사용, 없으면 새로 생성
-                should_close_browser = False
-                if not browser:
-                    playwright, browser = self.create_playwright_browser()
-                    should_close_browser = True
-                    if not browser:
+                # ⭐ 컨텍스트가 전달되었으면 재사용, 없으면 새로 생성
+                should_close_context = False
+                playwright, browser = None, None
+                if not context:
+                    playwright, browser, context = self.create_playwright_browser()
+                    should_close_context = True
+                    if not context:
                         raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
                 try:
@@ -1337,7 +1349,7 @@ class JobMonitoringDAG:
                     page = None
                     for attempt in range(max_retries):
                         try:
-                            page = browser.new_page()  # 페이지만 새로 생성 (브라우저 재사용)
+                            page = context.new_page()  # 컨텍스트에서 페이지 생성 (타임아웃 자동 적용)
                             page.set_extra_http_headers({"Accept-Encoding": "gzip"})
                             page.goto(url, timeout=page_timeout)  # URL별 타임아웃
 
@@ -1369,19 +1381,21 @@ class JobMonitoringDAG:
                         finally:
                             if page:
                                 try:
-                                    page.close()  # 페이지만 닫기 (브라우저는 유지)
+                                    page.close()  # 페이지만 닫기 (컨텍스트는 유지)
                                 except:
                                     pass
 
                     raise Exception("모든 재시도 실패")
 
                 finally:
-                    # ⭐ 직접 생성한 브라우저만 닫기
-                    if should_close_browser:
+                    # ⭐ 직접 생성한 컨텍스트/브라우저만 닫기
+                    if should_close_context:
                         try:
+                            if context:
+                                context.close()
                             if browser:
                                 browser.close()
-                            if 'playwright' in locals():
+                            if playwright:
                                 playwright.stop()
                         except:
                             pass
@@ -1447,8 +1461,8 @@ class JobMonitoringDAG:
                 self.logger.debug(f"HTTP 요청 성공: {url} (응답 코드: {response.status_code})")
                 return response.text
             else:
-                playwright, browser = self.create_playwright_browser()
-                if not playwright or not browser:
+                playwright, browser, context = self.create_playwright_browser()
+                if not playwright or not browser or not context:
                     raise Exception("Playwright 브라우저를 시작할 수 없습니다.")
 
                 try:
@@ -1456,7 +1470,7 @@ class JobMonitoringDAG:
                     page = None
                     for attempt in range(max_retries):
                         try:
-                            page = browser.new_page()
+                            page = context.new_page()
                             # 메모리 사용량 줄이기 위한 설정
                             page.set_extra_http_headers({"Accept-Encoding": "gzip"})
 
@@ -1500,6 +1514,8 @@ class JobMonitoringDAG:
                 finally:
                     # 브라우저 정리
                     try:
+                        if context:
+                            context.close()
                         if browser:
                             browser.close()
                         if playwright:
@@ -1533,9 +1549,10 @@ class JobMonitoringDAG:
                 pass
 
     def create_playwright_browser(self):
-        """Playwright 브라우저 인스턴스 생성"""
+        """Playwright 브라우저 인스턴스 생성 (타임아웃 강제 설정)"""
         playwright = None
         browser = None
+        context = None
         try:
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(
@@ -1553,19 +1570,25 @@ class JobMonitoringDAG:
                     "--max_old_space_size=2048"  # 메모리 제한 설정
                 ]
             )
-            self.logger.info("Playwright 브라우저 실행 성공")
-            return playwright, browser
+            # ⭐ 브라우저 컨텍스트 생성 및 타임아웃 강제 설정
+            context = browser.new_context()
+            context.set_default_timeout(60000)  # 60초 - 요소 대기, 클릭 등
+            context.set_default_navigation_timeout(90000)  # 90초 - 페이지 이동
+            self.logger.info("Playwright 브라우저 실행 성공 (타임아웃: 60초/90초)")
+            return playwright, browser, context
         except Exception as e:
             self.logger.error(f"Playwright 브라우저 실행 실패: {e}")
             # 실패 시 정리
             try:
+                if context:
+                    context.close()
                 if browser:
                     browser.close()
                 if playwright:
                     playwright.stop()
             except:
                 pass
-            return None, None
+            return None, None, None
 
     def load_existing_jobs(self) -> Dict[str, Set[str]]:
         if not os.path.exists(self.results_path):
