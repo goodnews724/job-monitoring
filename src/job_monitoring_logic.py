@@ -1,5 +1,6 @@
 import os
 import time
+import gc
 import pandas as pd
 import requests
 import re
@@ -164,6 +165,11 @@ class JobMonitoringDAG:
                     self.logger.error(f"❌ 청크 {i+1} 선택자 업데이트 실패: {e}")
 
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
+
+                # 청크 처리 후 메모리 정리
+                gc.collect()
+                self.logger.info("🧹 메모리 정리 완료 (gc.collect)")
+
                 if i < num_chunks - 1:
                     self.logger.info(f"다음 청크 처리를 위해 30초간 대기합니다.")
                     time.sleep(30)
