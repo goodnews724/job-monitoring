@@ -1767,6 +1767,10 @@ class JobMonitoringDAG:
 
         def create_unified_message():
             """통합 메시지를 생성합니다."""
+            # [DEBUG] 함수 진입 확인
+            self.logger.info(f"[DEBUG SLACK] create_unified_message 진입 - new_jobs type: {type(new_jobs)}, len: {len(new_jobs) if new_jobs else 0}")
+            self.logger.info(f"[DEBUG SLACK] new_jobs keys: {list(new_jobs.keys())[:5] if new_jobs else 'None'}")
+
             content_sections = []
 
             # 요약 헤더 생성
@@ -1814,9 +1818,11 @@ class JobMonitoringDAG:
                             self.logger.info(f"[DEBUG GROUP] companies='{company_names[:50]}', url='{url[:50]}', linked='{linked_company[:80]}'")
 
                 # 개별 회사 처리 (URL 그룹에 속하지 않는 회사들)
+                self.logger.info(f"[DEBUG SLACK] company_urls 개수: {len(self.company_urls)}")
                 for company, jobs in new_jobs.items():
                     if company not in processed_companies:
                         company_url = self.company_urls.get(company, "")
+                        self.logger.info(f"[DEBUG SLACK] 회사: '{company}' -> URL: '{company_url[:50] if company_url else 'EMPTY'}'")
                         linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
                         company_with_time = f"{linked_company} - {formatted_datetime}"
                         job_lines = [f"  • {self._highlight_foreign_keywords(self._clean_job_title(job))[0]}" for job in jobs]
