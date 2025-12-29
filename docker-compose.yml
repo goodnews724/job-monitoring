@@ -91,7 +91,7 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     restart: unless-stopped
-    command: bash -c "airflow serve-logs & scheduler"
+    command: bash -c "airflow serve-logs & airflow scheduler"
     ports:
       - "8793:8793"
     healthcheck:
