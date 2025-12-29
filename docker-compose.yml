@@ -15,6 +15,7 @@ x-airflow-common: &airflow-common
     - TOP5000COMPANY_URL=${TOP5000COMPANY_URL}
     # 메모리 최적화 설정
     - AIRFLOW__WEBSERVER__WORKERS=2
+    - AIRFLOW__WEBSERVER__BASE_URL=http://localhost:8080
     - AIRFLOW__CORE__PARALLELISM=8
     - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG=1
     # Airflow 관리자 계정 자동 생성
