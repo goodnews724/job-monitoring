@@ -57,9 +57,6 @@ with DAG(
 
 # 5000대 기업 DAG 전용 설정
 top5000_args = default_args.copy()
-top5000_args.update({
-    'depends_on_past': True,  # 이전 실행 성공해야 다음 실행 가능
-})
 
 # 5000대 기업 DAG - 매일 19시 실행
 with DAG(
