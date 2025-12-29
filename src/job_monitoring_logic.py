@@ -1786,6 +1786,7 @@ class JobMonitoringDAG:
                 url_groups = getattr(self, 'global_url_groups', {}) or getattr(self, 'url_groups_for_notification', {})
 
                 # URL 그룹 처리 (같은 URL을 사용하는 여러 회사들)
+                self.logger.info(f"[DEBUG] url_groups 개수: {len(url_groups)}")
                 for url, grouped_companies in url_groups.items():
                     if len(grouped_companies) > 1:
                         # 그룹에 속한 회사들 중 새로운 공고가 있는 회사들만 확인
@@ -1802,6 +1803,8 @@ class JobMonitoringDAG:
                             group_info = f"🔗 *{len(companies_with_jobs)}개 회사 공유 URL*"
                             content_sections.append(f"📢 {company_with_time} - {len(jobs)}개\n{group_info}\n{job_text}")
                             processed_companies.update(companies_with_jobs)
+                            # 디버깅용 로그
+                            self.logger.info(f"[DEBUG GROUP] companies='{company_names[:50]}', url='{url[:50]}', linked='{linked_company[:80]}'")
 
                 # 개별 회사 처리 (URL 그룹에 속하지 않는 회사들)
                 for company, jobs in new_jobs.items():
@@ -1811,7 +1814,10 @@ class JobMonitoringDAG:
                         company_with_time = f"{linked_company} - {formatted_datetime}"
                         job_lines = [f"  • {self._highlight_foreign_keywords(self._clean_job_title(job))[0]}" for job in jobs]
                         job_text = "\n".join(job_lines)
-                        content_sections.append(f"📢 {company_with_time} - {len(jobs)}개\n{job_text}")
+                        section_content = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
+                        content_sections.append(section_content)
+                        # 디버깅용 로그
+                        self.logger.info(f"[DEBUG] company='{company}', url='{company_url[:50] if company_url else 'N/A'}', linked='{linked_company[:80]}'")
 
             # 2. 확인이 필요한 공고 섹션
             if warnings:
