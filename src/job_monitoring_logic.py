@@ -156,13 +156,16 @@ class JobMonitoringDAG:
                     if is_first_chunk:
                         is_first_chunk = False
 
-                # 6. 구글 시트 선택자 업데이트
-                self.logger.info(f"청크 {i+1}/{num_chunks} 선택자 업데이트 중...")
-                try:
-                    self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
-                    self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 선택자 업데이트 완료")
-                except Exception as e:
-                    self.logger.error(f"❌ 청크 {i+1} 선택자 업데이트 실패: {e}")
+                # 6. 구글 시트 선택자 업데이트 (테스트 모드에서는 건너뜀)
+                if self.limit:
+                    self.logger.info(f"⚠️ 테스트 모드 - 청크 {i+1}/{num_chunks} 선택자 업데이트 건너뜀")
+                else:
+                    self.logger.info(f"청크 {i+1}/{num_chunks} 선택자 업데이트 중...")
+                    try:
+                        self.sheet_manager.update_selector_column_only(df_config, self.worksheet_name)
+                        self.logger.info(f"✅ 청크 {i+1}/{num_chunks} 선택자 업데이트 완료")
+                    except Exception as e:
+                        self.logger.error(f"❌ 청크 {i+1} 선택자 업데이트 실패: {e}")
 
                 self.logger.info(f"--- 청크 처리 종료: {chunk_info} ---")
 
@@ -174,12 +177,16 @@ class JobMonitoringDAG:
                     self.logger.info(f"다음 청크 처리를 위해 30초간 대기합니다.")
                     time.sleep(30)
 
-            self.logger.info("모든 청크 처리 완료. 최종 시트 업데이트 중...")
-            try:
-                self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
-                self.logger.info("✅ 최종 시트 업데이트 완료")
-            except Exception as e:
-                self.logger.error(f"❌ 최종 시트 업데이트 실패: {e}")
+            self.logger.info("모든 청크 처리 완료.")
+            if self.limit:
+                self.logger.info("⚠️ 테스트 모드 - 시트 전체 업데이트를 건너뜁니다 (데이터 손실 방지)")
+            else:
+                self.logger.info("최종 시트 업데이트 중...")
+                try:
+                    self.sheet_manager.update_sheet_from_df(df_config, self.worksheet_name)
+                    self.logger.info("✅ 최종 시트 업데이트 완료")
+                except Exception as e:
+                    self.logger.error(f"❌ 최종 시트 업데이트 실패: {e}")
 
         else:
             original_df_config = df_config.copy()
