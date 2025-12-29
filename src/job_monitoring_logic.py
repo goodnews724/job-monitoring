@@ -1751,12 +1751,11 @@ class JobMonitoringDAG:
 
         def send_payload(payload):
             try:
-                # 모든 텍스트 필드 안전하게 처리
-                for block in payload.get('blocks', []):
-                    if block.get('type') == 'section' and 'text' in block:
-                        block['text']['text'] = sanitize_slack_text(block['text']['text'])
+                # 텍스트 필드 안전하게 처리
+                if 'text' in payload:
+                    payload['text'] = sanitize_slack_text(payload['text'])
 
-                self.logger.info(f"📤 슬랙 메시지 전송 시도 (블록 개수: {len(payload.get('blocks', []))})")
+                self.logger.info(f"📤 슬랙 메시지 전송 시도")
                 response = requests.post(self.webhook_url, json=payload, timeout=15)
                 if response.status_code == 200:
                     self.logger.info("✅ 슬랙 알림 전송 완료")
@@ -1880,6 +1879,11 @@ class JobMonitoringDAG:
             """통합 메시지를 페이징하여 전송합니다."""
             CHAR_LIMIT = 2800
 
+            # [DEBUG] 전송 전 내용 확인
+            self.logger.info(f"[DEBUG SLACK] content_sections 개수: {len(content_sections)}")
+            if content_sections:
+                self.logger.info(f"[DEBUG SLACK] 첫 번째 섹션 미리보기: {content_sections[0][:200] if content_sections[0] else 'EMPTY'}")
+
             # 전체 컨텐츠를 하나의 문자열로 결합
             full_content = "\n".join(content_sections)
 
@@ -1887,14 +1891,13 @@ class JobMonitoringDAG:
             header_overhead = len(header) + 100  # 여유분 포함
             content_limit = CHAR_LIMIT - header_overhead
 
+            self.logger.info(f"[DEBUG SLACK] full_content 길이: {len(full_content)}, content_limit: {content_limit}")
+
             if len(full_content) <= content_limit:
-                # 한 번에 전송 가능
-                blocks = [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": header}},
-                    {"type": "divider"},
-                    {"type": "section", "text": {"type": "mrkdwn", "text": full_content}}
-                ]
-                payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                # 한 번에 전송 가능 - 단순 텍스트 형식
+                full_message = f"{header}\n\n{full_content}"
+                self.logger.info(f"[DEBUG SLACK] 전송할 메시지 미리보기: {full_message[:300]}...")
+                payload = {"text": full_message, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
                 send_payload(payload)
             else:
                 # 페이징 필요
@@ -1913,38 +1916,22 @@ class JobMonitoringDAG:
                 if current_page:
                     pages.append(current_page)
 
-                # 각 페이지 전송 (연속성을 위한 개선)
+                # 각 페이지 전송 - 단순 텍스트 형식
                 for i, page_content in enumerate(pages):
                     if i == 0:
                         # 첫 번째 페이지
                         if len(pages) > 1:
-                            page_header = f"{header}"
-                            page_footer = f"\n\n*({i+1}/{len(pages)})*"
-                            page_content_with_footer = page_content + page_footer
+                            full_message = f"{header}\n\n{page_content}\n\n*({i+1}/{len(pages)})*"
                         else:
-                            page_header = header
-                            page_content_with_footer = page_content
+                            full_message = f"{header}\n\n{page_content}"
                     elif i == len(pages) - 1:
                         # 마지막 페이지
-                        page_header = ""
-                        page_content_with_footer = f"{page_content}\n\n:white_check_mark: *전체 결과 끝* *({i+1}/{len(pages)})*"
+                        full_message = f"{page_content}\n\n:white_check_mark: *전체 결과 끝* *({i+1}/{len(pages)})*"
                     else:
                         # 중간 페이지
-                        page_header = ""
-                        page_footer = f"\n\n*({i+1}/{len(pages)})*"
-                        page_content_with_footer = page_content + page_footer
+                        full_message = f"{page_content}\n\n*({i+1}/{len(pages)})*"
 
-                    if page_header:
-                        blocks = [
-                            {"type": "section", "text": {"type": "mrkdwn", "text": page_header}},
-                            {"type": "divider"},
-                            {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
-                        ]
-                    else:
-                        blocks = [
-                            {"type": "section", "text": {"type": "mrkdwn", "text": page_content_with_footer}}
-                        ]
-                    payload = {"blocks": blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+                    payload = {"text": full_message, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
                     send_payload(payload)
 
                     # 페이지 간 최소 간격 (연속성 확보)
