@@ -11,6 +11,7 @@ import pytz
 import logging
 from typing import Dict, List, Set, Tuple, Optional
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from google_sheet_utils import GoogleSheetManager
 from analyze_titles import JobPostingSelectorAnalyzer
 from utils import stabilize_selector, SeleniumRequirementChecker
@@ -413,8 +414,25 @@ class JobMonitoringDAG:
 
         self.logger.info(f"  - {company_name} 기존 선택자 확인: '{selector}' (타입: {type(selector)})")
 
-        # 컨텍스트 재사용
-        html_content = self.get_html_content_for_crawling_with_browser(url, use_selenium, context)
+        # ⭐ 스레드 기반 강제 타임아웃 (JavaScript 무한 루프 방지)
+        # toss.im은 3분, 나머지는 2분
+        hard_timeout = 180 if 'toss.im' in url else 120
+
+        html_content = None
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    self.get_html_content_for_crawling_with_browser,
+                    url, use_selenium, context, selector
+                )
+                html_content = future.result(timeout=hard_timeout)
+        except FuturesTimeoutError:
+            self.logger.error(f"  - {company_name} 강제 타임아웃 ({hard_timeout}초) - JavaScript 무한 루프 의심")
+            return index, None, None, {'company': company_name, 'reason': f'강제 타임아웃 ({hard_timeout}초)', 'url': url}
+        except Exception as e:
+            self.logger.error(f"  - {company_name} 크롤링 중 오류: {e}")
+            return index, None, None, {'company': company_name, 'reason': f'크롤링 오류: {e}', 'url': url}
+
         if not html_content:
             return None
 
