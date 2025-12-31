@@ -104,6 +104,48 @@ payload = {"text": full_message, "username": "채용공고 알리미", "icon_emo
 
 ---
 
+## 4. Playwright 무한 대기로 CPU 100% 문제
+
+### 증상
+- 태스크가 15시간 이상 100% CPU 사용하며 stuck 상태
+- `top` 명령어로 확인 시 904분(15시간+) 동안 CPU 점유
+- 로그에 특정 청크에서 마지막 출력 후 진행 없음
+
+### 원인
+- Playwright가 특정 URL에서 빈 셀렉터나 응답 없는 페이지로 인해 무한 대기
+- 기본 타임아웃 설정이 너무 길거나 없음
+
+### 해결책
+
+#### 4-1. 즉시 해결 (stuck 프로세스 종료)
+```bash
+# scheduler 컨테이너 재시작
+docker restart kowork-scaper-airflow-scheduler-1
+```
+
+#### 4-2. 근본 해결 - Playwright 타임아웃 강제 설정
+**파일:** `src/job_monitoring_logic.py`
+
+```python
+# 브라우저 컨텍스트에 타임아웃 설정
+context = browser.new_context()
+context.set_default_timeout(30000)  # 30초
+
+# 페이지별 타임아웃
+page.set_default_timeout(30000)
+```
+
+### 모니터링
+```bash
+# CPU 사용률이 높은 프로세스 확인
+top -o %CPU
+
+# Airflow 태스크 프로세스 확인
+ps aux | grep "airflow task"
+```
+
+---
+
 ## 변경된 파일 목록
 
 | 파일 | 변경 내용 |
@@ -124,6 +166,61 @@ swapon --show
 # 프로세스별 메모리
 ps aux --sort=-%mem | head -10
 ```
+
+---
+
+## 5. signal.alarm()으로 인한 전체 크롤링 실패 (2025-12-31)
+
+### 증상
+- 5000대 기업 DAG에서 **모든** 크롤링이 실패
+- 로그에 동일한 에러 반복:
+  ```
+  ERROR - 크롤링용 HTML 가져오기 실패 (기타 오류): [URL] - ValueError: signal only works in main thread
+  ```
+- 성공한 크롤링 0개, 실패 2670개
+
+### 원인
+- `get_html_content_for_crawling_with_browser` 함수에서 `signal.alarm()` 사용
+- `signal.alarm()`은 **메인 스레드에서만** 동작
+- Airflow 워커가 멀티스레드 환경에서 실행되어 메인 스레드가 아닌 곳에서 호출됨
+- 결과: 모든 크롤링이 시작 즉시 ValueError로 실패
+
+### 문제 코드
+```python
+# job_monitoring_logic.py (1326~1345번 줄)
+import signal
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("크롤링 타임아웃")
+
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm(timeout_seconds)  # ❌ 메인 스레드가 아니면 실패
+```
+
+### 해결책
+`signal.alarm()` 코드 제거, Playwright 내장 타임아웃만 사용:
+
+```python
+# 변경 후 - signal 관련 코드 모두 제거
+def get_html_content_for_crawling_with_browser(self, url, use_selenium, context=None, selector=None):
+    try:
+        # Playwright 자체 타임아웃만 사용
+        if 'toss.im' in url:
+            page_timeout = 60000  # 60초
+            wait_time = 3
+        else:
+            page_timeout = 20000  # 20초
+            wait_time = 1
+        # ... (signal 코드 없음)
+```
+
+### 수정된 함수
+- `get_html_content_for_crawling_with_browser()` - signal 제거
+- `get_html_content_for_crawling_old()` - signal 제거 (DEPRECATED 함수)
+
+### 교훈
+- `signal` 모듈은 메인 스레드 전용이므로 Airflow, Celery 등 워커 환경에서 사용 불가
+- 타임아웃은 라이브러리 내장 기능(Playwright `timeout` 파라미터) 또는 `threading` 기반으로 구현해야 함
 
 ---
 

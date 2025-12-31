@@ -1325,24 +1325,14 @@ class JobMonitoringDAG:
 
     def get_html_content_for_crawling_with_browser(self, url, use_selenium, context=None, selector=None):
         """실제 크롤링용 HTML 가져오기 (Playwright 컨텍스트 재사용)"""
-        import signal
-
-        def timeout_handler(signum, frame):
-            raise TimeoutError("크롤링 타임아웃")
-
         try:
-            # URL별 타임아웃 설정 (signal은 백업용, Playwright 자체 타임아웃이 우선)
+            # URL별 타임아웃 설정 (Playwright 자체 타임아웃 사용)
             if 'toss.im' in url:
-                timeout_seconds = 180  # toss.im: 3분
                 page_timeout = 60000  # 60초
                 wait_time = 3
             else:
-                timeout_seconds = 60   # 나머지: 1분
                 page_timeout = 20000   # 20초
                 wait_time = 1
-
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout_seconds)
 
             if not use_selenium:
                 # 더 현실적인 브라우저 헤더 사용
@@ -1449,11 +1439,6 @@ class JobMonitoringDAG:
         except Exception as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패 (기타 오류): {url} - {type(e).__name__}: {str(e)}")
             return None
-        finally:
-            try:
-                signal.alarm(0)
-            except:
-                pass
 
     def get_html_content_for_crawling(self, url, use_selenium, selector=None):
         """실제 크롤링용 HTML 가져오기 메서드 (하위 호환성 유지)"""
@@ -1461,15 +1446,7 @@ class JobMonitoringDAG:
 
     def get_html_content_for_crawling_old(self, url, use_selenium, selector=None):
         """[DEPRECATED] 실제 크롤링용 HTML 가져오기 메서드 (Playwright 매번 생성 - 사용 안 함)"""
-        import signal
-
-        def timeout_handler(signum, frame):
-            raise TimeoutError("크롤링 타임아웃")
-
         try:
-            # 개별 URL 크롤링에 5분 타임아웃 설정
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(300)  # 5분
             if not use_selenium:
                 # 더 현실적인 브라우저 헤더 사용
                 headers = {
@@ -1572,12 +1549,6 @@ class JobMonitoringDAG:
         except Exception as e:
             self.logger.error(f"크롤링용 HTML 가져오기 실패 (기타 오류): {url} - {type(e).__name__}: {str(e)}")
             return None
-        finally:
-            # 타임아웃 알람 해제
-            try:
-                signal.alarm(0)
-            except:
-                pass
 
     def create_playwright_browser(self):
         """Playwright 브라우저 인스턴스 생성 (타임아웃 강제 설정)"""
