@@ -19,7 +19,7 @@
 ### 주요 특징
 - **지능형 크롤링**: 동적/정적 웹사이트를 자동으로 구분하여 최적화된 방법으로 크롤링
 - **패턴 기반 선택자 생성**: 채용공고 영역을 자동으로 감지하는 CSS 선택자 생성
-- **대용량 처리**: 5000대 기업을 청크 단위로 안전하게 병렬 처리
+- **대용량 처리**: 5000대 기업을 청크 단위로 안전하게 순차 처리
 - **실시간 알림**: 새로운 채용공고 발견 시 Slack으로 즉시 알림
 - **웹 기반 관리**: Google Sheets를 통한 중앙화된 설정 관리
 
@@ -198,7 +198,7 @@ Google Sheets 데이터 로드
 통합 전처리 & 크롤링
     ├─ Selenium 필요성 자동 판단
     ├─ CSS 선택자 자동 생성/재활용
-    ├─ 병렬 HTML 수집 (3개 워커)
+    ├─ 순차 HTML 수집 (Playwright 컨텍스트 재사용)
     └─ 채용공고 데이터 추출
     ↓
 결과 비교 & 분석
@@ -207,7 +207,7 @@ Google Sheets 데이터 로드
     └─ 의심스러운 변경사항 체크
     ↓
 Slack 알림 발송
-    ├─ 구조화된 메시지 (Block Kit)
+    ├─ 구조화된 메시지 (텍스트 형식)
     ├─ 회사별 그룹화
     ├─ 외국인 공고 하이라이트
     └─ 시간 정보 포함
@@ -277,719 +277,554 @@ CSS 선택자 처리
 
 **JobMonitoringDAG 클래스 초기화:**
 ```python
-# job_monitoring_logic.py:21-45
-def __init__(self, base_dir, worksheet_name, webhook_url_env, results_filename):
+# job_monitoring_logic.py:22-38
+def __init__(self, base_dir, worksheet_name='[등록]채용홈페이지 모음', webhook_url_env='SLACK_WEBHOOK_URL', results_filename='job_postings_latest.csv', limit=None):
     # 1. 환경변수 및 기본 설정 로드
     self.base_dir = base_dir  # 작업 디렉토리
     self.worksheet_name = worksheet_name  # 처리할 시트명
     self.webhook_url = os.getenv(webhook_url_env)  # 슬랙 웹훅 URL
-    self.results_filename = results_filename  # 결과 저장 파일명
+    self.limit = limit  # 테스트용 처리 제한
+    self.company_urls = {}
+    self.foreign_keywords = []  # 외국인 채용공고 키워드
 
-    # 2. Google Sheets 연동 관리자 초기화
-    self.sheet_manager = GoogleSheetManager()
+    # 2. HTTP 세션 설정 (쿠키 및 연결 유지)
+    self.session = requests.Session()
+    self._setup_session()
 
-    # 3. 성능 설정 로드
-    self.max_workers = int(os.getenv('MAX_WORKERS', 3))  # 병렬 처리 워커 수
-
-    # 4. 로거 설정 (시간, 레벨, 메시지 포맷)
-    self.logger = self._setup_logger()
+    # 3. 로거 설정 (시간, 레벨, 메시지 포맷)
+    self._setup_logging()
 ```
 
 **Google Sheets 연동 초기화:**
 ```python
-# google_sheet_utils.py:15-30
+# google_sheet_utils.py:7-38
 class GoogleSheetManager:
-    def __init__(self):
-        # 1. 서비스 계정 인증 정보 로드
-        self.credentials = service_account.Credentials.from_service_account_file(
-            'key/credentials.json',
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
-        )
+    def __init__(self, base_dir: str):
+        self.base_dir = base_dir
+        self.sheet_key = os.getenv('GOOGLE_SHEET_KEY')
+        self.creds_path = os.path.join(self.base_dir, 'key', 'credentials.json')
+        self.logger = logging.getLogger(__name__)
+        self.gc = self._authorize()
 
-        # 2. Google Sheets API 클라이언트 생성
-        self.service = build('sheets', 'v4', credentials=self.credentials)
-
-        # 3. 스프레드시트 ID 환경변수에서 로드
-        self.spreadsheet_id = os.getenv('GOOGLE_SHEET_KEY')
+    def _authorize(self):
+        """Google API 인증"""
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        creds = Credentials.from_service_account_file(self.creds_path, scopes=scopes)
+        gc = gspread.authorize(creds)
+        return gc
 ```
 
 ### 2. 데이터 로드 및 전처리
 
 **Google Sheets에서 회사 목록 로드:**
 ```python
-# job_monitoring_logic.py:71-92
+# job_monitoring_logic.py:82-100
 def run(self):
-    # 1. 시트에서 회사 목록 데이터 로드
-    df_config = self.sheet_manager.load_sheet_to_df(self.worksheet_name)
+    self.sheet_manager = GoogleSheetManager(self.base_dir)
+    self.selenium_checker = SeleniumRequirementChecker()
+    self.selector_analyzer = JobPostingSelectorAnalyzer()
 
-    # 2. 필수 컬럼 검증 (회사_한글_이름, job_posting_url)
-    required_columns = ['회사_한글_이름', 'job_posting_url']
-    if not all(col in df_config.columns for col in required_columns):
-        raise ValueError(f"필수 컬럼 누락: {required_columns}")
+    self.logger.info(f"🚀 Job Monitoring DAG 시작 - {self.worksheet_name}")
+    df_config = self.sheet_manager.get_all_records_as_df(self.worksheet_name)
+    if df_config.empty:
+        self.logger.error(f"설정 정보를 가져오지 못했습니다: {self.worksheet_name}")
+        return
 
-    # 3. 빈 URL 제거 및 데이터 정제
-    df_config = df_config.dropna(subset=['job_posting_url'])
-    df_config = df_config[df_config['job_posting_url'].str.strip() != '']
+    if self.limit:
+        self.logger.info(f"테스트 목적으로 {self.limit}개 기업만 처리합니다.")
+        df_config = df_config.head(self.limit)
 
-    # 4. 외국인 채용 키워드 시트 로드
+    # 외국인 채용 키워드 시트 로드
     keyword_sheets = ['5000대_기업', '[등록]채용홈페이지 모음']
     if self.worksheet_name in keyword_sheets:
-        try:
-            foreign_keywords_df = self.sheet_manager.load_sheet_to_df('외국인_키워드')
-            self.foreign_keywords = foreign_keywords_df['키워드'].dropna().tolist()
-        except:
-            self.foreign_keywords = []  # 키워드 시트 없으면 빈 리스트
+        # 외국인 채용공고 키워드 로드
+        ...
 ```
 
 ### 3. Selenium 필요성 자동 판단
 
 **동적/정적 웹사이트 판단 로직:**
 ```python
-# job_monitoring_logic.py:574-620
-def _determine_selenium_requirement(self, url, company_name):
-    """
-    웹사이트 분석을 통한 크롤링 방식 자동 결정
-    """
-    try:
-        # 1. 기본 HTML 헤더 요청으로 접근성 확인
-        response = requests.head(url, timeout=10, allow_redirects=True)
-        if response.status_code != 200:
-            return -1  # 접근 불가
+# utils.py:44-137 - SeleniumRequirementChecker 클래스
+class SeleniumRequirementChecker:
+    """채용공고 URL에 대해 Selenium 필요 여부를 판별하는 클래스"""
 
-        # 2. HTML 콘텐츠 가져오기 시도
-        html_response = requests.get(url, timeout=15, headers=HEADERS)
-        if html_response.status_code != 200:
-            return -1
+    def check_selenium_requirement(self, url: str, selector: Optional[str] = None) -> bool:
+        """URL과 CSS 선택자를 기준으로 Selenium 필요 여부를 판별"""
+        try:
+            response = requests.get(url, headers=self.headers, timeout=self.timeout)
+            soup = BeautifulSoup(response.text, 'html.parser')
 
-        html_content = html_response.text
+            # 사이트별 특수 처리
+            if "greetinghr.com" in url:
+                return self._check_greetinghr(url, soup)
 
-        # 3. SPA 프레임워크 감지
-        spa_patterns = [
-            r'react',           # React
-            r'vue\.js',         # Vue.js
-            r'angular',         # Angular
-            r'next\.js',        # Next.js
-            r'nuxt',            # Nuxt.js
-            r'__NEXT_DATA__'    # Next.js 특정 패턴
+            return self._check_general_selector(url, selector, soup)
+        except:
+            return True  # 접근 실패시 Selenium 사용
+
+    def _is_spa_site(self, soup: BeautifulSoup) -> bool:
+        """SPA(Single Page Application) 사이트인지 감지"""
+        # 1. React/Next.js/Vue 등의 SPA 지표 감지
+        strong_spa_indicators = [
+            '__next', 'buildId', '__NEXT_DATA__',  # Next.js
+            'reactroot', 'react-root',              # React
+            '__vue__', '__nuxt__',                  # Vue/Nuxt
+            'ng-app', 'ng-version'                  # Angular
         ]
 
-        for pattern in spa_patterns:
-            if re.search(pattern, html_content, re.IGNORECASE):
-                self.logger.info(f"{company_name}: SPA 프레임워크 감지 - Selenium 필요")
-                return 1
+        html_content = str(soup).lower()
+        body = soup.find('body')
+        body_text = body.get_text(strip=True) if body else ""
 
-        # 4. JavaScript 의존도 분석
-        js_indicators = [
-            'document.addEventListener',
-            'window.onload',
-            'ajax',
-            'fetch(',
-            'XMLHttpRequest'
-        ]
+        # 2. SPA 지표 + 적은 body 텍스트 = SPA
+        if any(ind in html_content for ind in strong_spa_indicators) and len(body_text) < 500:
+            return True
 
-        js_count = sum(1 for indicator in js_indicators
-                      if indicator in html_content)
+        # 3. 극도로 적은 body 내용 + 많은 스크립트 = SPA
+        scripts = soup.find_all('script')
+        if len(body_text) < 50 and len(scripts) > 5:
+            return True
 
-        if js_count >= 3:  # 다중 JS 패턴 발견시
-            return 1
+        return False
 
-        # 5. 특정 도메인 예외 처리
-        domain_exceptions = {
-            'workday.com': 1,      # 항상 동적
-            'lever.co': 1,         # 항상 동적
-            'greenhouse.io': 1,    # 항상 동적
-            'notion.site': 1,      # Notion 페이지
-        }
-
-        parsed_url = urlparse(url)
-        for domain, selenium_required in domain_exceptions.items():
-            if domain in parsed_url.netloc:
-                return selenium_required
-
-        return 0  # 정적 사이트로 판단
-
-    except Exception as e:
-        self.logger.error(f"{company_name} Selenium 필요성 판단 실패: {e}")
-        return -1
+# job_monitoring_logic.py:1187-1197 - 위 클래스 사용
+def _determine_selenium_requirement(self, url: str, _: str) -> int:
+    """URL을 기반으로 Selenium 필요 여부를 동적으로 판단"""
+    selenium_req = self.selenium_checker.check_selenium_requirement(url)
+    return int(selenium_req)  # True=1(Selenium), False=0(requests)
 ```
 
 ### 4. HTML 콘텐츠 수집
 
 **동적/정적 방식 자동 선택:**
 ```python
-# job_monitoring_logic.py:450-520
-def get_html_content_for_crawling(self, url, selenium_required):
-    """
-    사이트 특성에 맞는 최적의 방법으로 HTML 수집
-    """
-    if selenium_required == 1:
-        return self._get_html_with_playwright(url)
+# job_monitoring_logic.py:1317-1436
+def get_html_content_for_crawling_with_browser(self, url, use_selenium, context=None, selector=None):
+    """실제 크롤링용 HTML 가져오기 (Playwright 컨텍스트 재사용)"""
+    # URL별 타임아웃 설정
+    if 'toss.im' in url:
+        page_timeout = 60000  # 60초
+        wait_time = 3
     else:
-        return self._get_html_with_requests(url)
+        page_timeout = 20000  # 20초
+        wait_time = 1
 
-def _get_html_with_requests(self, url):
-    """정적 사이트용 고속 HTML 수집"""
-    try:
-        # 1. 안전한 헤더 설정 (봇 차단 우회)
+    if not use_selenium:
+        # 정적 사이트: requests로 빠르게 처리
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...',
+            'Accept': 'text/html,application/xhtml+xml,...',
+            ...
         }
+        response = requests.get(url, headers=headers, timeout=20, verify=False)
+        return response.text
+    else:
+        # 동적 사이트: Playwright 브라우저 사용
+        # 컨텍스트가 전달되었으면 재사용, 없으면 새로 생성
+        should_close_context = False
+        if not context:
+            playwright, browser, context = self.create_playwright_browser()
+            should_close_context = True
 
-        # 2. 타임아웃과 재시도 설정
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
+        page = context.new_page()
+        page.goto(url, timeout=page_timeout)
 
-        return response.text, True
+        # 선택자가 있으면 해당 요소 대기
+        if selector:
+            page.wait_for_selector(selector, timeout=page_timeout // 2)
 
-    except Exception as e:
-        return None, False
+        time.sleep(wait_time)
+        html_content = page.content()
+        page.close()  # 페이지만 닫기 (컨텍스트는 유지)
 
-def _get_html_with_playwright(self, url):
-    """동적 사이트용 브라우저 자동화"""
-    try:
-        # 1. 브라우저 실행 (헤드리스 모드)
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+        return html_content
 
-            # 2. 브라우저 환경 설정
-            page.set_viewport_size({"width": 1920, "height": 1080})
-            page.set_extra_http_headers({
-                "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8"
-            })
-
-            # 3. 페이지 로드 및 JS 실행 대기
-            page.goto(url, wait_until='domcontentloaded', timeout=30000)
-
-            # 4. 추가 렌더링 대기 (AJAX 로드 등)
-            page.wait_for_timeout(2000)
-
-            # 5. 최종 HTML 추출
-            html_content = page.content()
-            browser.close()
-
-            return html_content, True
-
-    except Exception as e:
-        return None, False
+def get_html_content_for_crawling(self, url, use_selenium, selector=None):
+    """실제 크롤링용 HTML 가져오기 메서드 (하위 호환성 유지)"""
+    return self.get_html_content_for_crawling_with_browser(url, use_selenium, None, selector)
 ```
 
 ### 5. CSS 선택자 생성 및 검증
 
 **기존 선택자 재활용 우선 로직:**
 ```python
-# job_monitoring_logic.py:290-340
-def _process_company_complete(self, company_name, url, existing_selector):
-    """
-    선택자 찾기와 크롤링을 동시에 처리하는 통합 로직
-    """
-    # 1. 기존 검증된 선택자 재활용 체크
-    if existing_selector and len(existing_selector.strip()) > 20:
-        self.logger.info(f"{company_name}: 기존 검증된 선택자 재활용")
+# job_monitoring_logic.py:657-714
+def _process_company_complete(self, args):
+    """선택자 찾기와 공고 수집을 한번에 처리"""
+    index, row, existing_selectors = args
+    company_name = row['회사_한글_이름']
+    url = row['job_posting_url']
+    selector = row.get('selector', '')
+    use_selenium = row['selenium_required']
 
-        # 기존 선택자로 크롤링 시도
-        html_content, success = self.get_html_content_for_crawling(url, selenium_required)
-        if success and html_content:
-            job_postings = self._extract_job_postings_from_html(html_content, existing_selector)
-            if len(job_postings) > 0:
-                # 성공시 기존 선택자 그대로 사용
-                return {
-                    'selector': existing_selector,
-                    'selenium_required': selenium_required,
-                    'job_postings': job_postings
-                }
+    self.company_urls[company_name] = url
+    html_content = self.get_html_content_for_crawling(url, use_selenium)
 
-    # 2. 새 선택자 생성 필요
-    self.logger.info(f"{company_name}: 새 선택자 생성 중...")
-    return self._generate_new_selector_and_crawl(company_name, url)
+    if not html_content:
+        return index, None, None, {'company': company_name, 'reason': 'HTML 가져오기 실패', 'url': url, 'selenium_status': -1}
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # 1. 선택자가 없거나 빈 경우 새로 찾기
+    if not selector or selector.strip() == '':
+        # 기존 선택자들 중 작동하는 것 찾기
+        found_selector = self._try_existing_selectors(soup, existing_selectors, company_name)
+
+        if found_selector:
+            selector = found_selector
+        else:
+            # 새 선택자 자동 생성
+            best_selector, _ = self.selector_analyzer.find_best_selector(soup)
+            if best_selector:
+                selector = best_selector
+            else:
+                return index, None, None, {'company': company_name, 'reason': '선택자를 찾을 수 없음', 'url': url, 'selenium_status': -2}
+
+    # 2. 선택자로 채용공고 추출
+    postings = soup.select(selector)
+    all_texts = [post.get_text(strip=True) for post in postings]
+    job_titles = {text for text in all_texts if self.selector_analyzer._is_potential_job_posting(text)}
+
+    if job_titles:
+        return index, selector, job_titles, None
+    else:
+        return index, selector, None, {'company': company_name, 'reason': '유효한 공고를 찾지 못함', 'url': url}
 ```
 
 **새 CSS 선택자 자동 생성:**
 ```python
-# analyze_titles.py:45-120
+# analyze_titles.py:9-63 - 클래스 초기화
 class JobPostingSelectorAnalyzer:
-    def find_best_job_posting_selector(self, html_content):
-        """
-        HTML에서 최적의 채용공고 선택자를 찾는 메인 로직
-        """
-        soup = BeautifulSoup(html_content, 'html.parser')
+    """채용공고 선택자 분석기"""
+    def __init__(self):
+        self.job_keywords = [
+            '개발자', '엔지니어', '디자이너', '기획자', '매니저', 'PM', '팀장', '전문가',
+            'developer', 'engineer', 'designer', 'manager', 'planner', 'lead',
+            '채용', '인턴', '신입', '경력', '정규직', '계약직'
+        ]
+        self.blacklist = ['nav', 'footer', 'header', 'menu', 'sitemap', 'aside', 'sidebar']
 
-        # 1. 채용공고 전용 컨테이너 우선 탐지
-        job_containers = self._find_job_containers(soup)
-        if job_containers:
-            return self._analyze_job_container_patterns(job_containers)
+    def _is_potential_job_posting(self, text: str) -> bool:
+        """텍스트가 채용공고일 가능성을 판단"""
+        if not (3 <= len(text) <= 150):
+            return False
 
-        # 2. 일반적인 링크 패턴 분석
-        all_links = soup.find_all('a', href=True)
-        job_links = self._filter_job_related_links(all_links)
-
-        if not job_links:
-            return None
-
-        # 3. 선택자 후보군 생성 및 평가
-        selector_candidates = self._generate_selector_candidates(job_links)
-        return self._evaluate_and_select_best(selector_candidates, soup)
-
-    def _find_job_containers(self, soup):
-        """채용공고 전용 컨테이너 탐지"""
-        # 채용 관련 키워드 패턴
-        job_keywords = [
-            'job', 'career', 'recruit', 'employment', 'position',
-            '채용', '모집', '구인', '입사', '직무'
+        # 회사명 패턴 제외
+        company_patterns = [
+            r'^(건설기계|HD현대\w*|삼성\w*|LG\w*|SK\w*|포스코\w*|롯데\w*|...)$',
+            ...
         ]
 
-        containers = []
+        # UI 요소 제외
+        datetime_patterns = [r'^D-\d+.*$', r'^#[^#]+(\s+외\s*\d+)?$', ...]
 
-        # class명과 id에서 채용 키워드 탐지
-        for keyword in job_keywords:
-            # 정확히 일치하거나 하이픈/언더스코어로 연결된 패턴
-            pattern = f'(^|[^a-zA-Z]){keyword}([^a-zA-Z]|$)'
+        return True  # 모든 필터 통과시
 
-            class_matches = soup.find_all(attrs={'class': re.compile(pattern, re.I)})
-            id_matches = soup.find_all(attrs={'id': re.compile(pattern, re.I)})
+# analyze_titles.py:349-500 - 최적 선택자 찾기
+def find_best_selector(self, soup: BeautifulSoup) -> Tuple[Optional[str], List[str]]:
+    # 1. 구체적인 채용공고 컨테이너 우선 찾기
+    specific_containers = self._find_job_posting_containers(soup)
+    if specific_containers:
+        best_container = max(specific_containers, key=lambda x: len(x[1]))
+        if len(best_container[1]) >= 1:
+            return best_container[0], best_container[1]
 
-            containers.extend(class_matches + id_matches)
+    # 2. 링크 텍스트 기반 검색
+    link_elements = []
+    for link in soup.find_all('a', href=True):
+        # 블랙리스트 영역 제외
+        if any(parent.name in self.blacklist for parent in link.find_parents()):
+            continue
+        text = link.get_text(strip=True)
+        if self._is_potential_job_posting(text) and len(text) > 5:
+            link_elements.append(link)
 
-        return list(set(containers))  # 중복 제거
+    # 3. 가중치 기반 부모 컨테이너 선택
+    parent_scores = {}
+    for element in link_elements:
+        text = element.get_text(strip=True)
+        weight = self._calculate_job_posting_weight(text)
+        for parent in element.find_parents(limit=3):
+            parent_scores[parent] = parent_scores.get(parent, 0) + weight
 
-    def _filter_job_related_links(self, links):
-        """직무 관련 링크만 필터링"""
-        job_related_texts = [
-            # 한글 직무명
-            '개발자', '프로그래머', '엔지니어', '디자이너', '기획자',
-            '마케터', '영업', '운영', '관리', '전문가', 'PM', 'PO',
-
-            # 영문 직무명
-            'developer', 'engineer', 'designer', 'manager', 'analyst',
-            'specialist', 'coordinator', 'lead', 'senior', 'junior'
-        ]
-
-        filtered_links = []
-        for link in links:
-            text = link.get_text(strip=True).lower()
-
-            # 직무 관련 텍스트 포함 여부 확인
-            if any(keyword in text for keyword in job_related_texts):
-                filtered_links.append(link)
-
-        return filtered_links
-
-    def _generate_selector_candidates(self, job_links):
-        """선택자 후보군 생성"""
-        candidates = {}
-
-        for link in job_links:
-            # 1. 클래스 기반 선택자
-            if link.get('class'):
-                class_selector = 'a.' + '.'.join(link['class'])
-                candidates[class_selector] = candidates.get(class_selector, 0) + 1
-
-            # 2. 부모 요소 기반 선택자
-            parent = link.parent
-            if parent and parent.get('class'):
-                parent_selector = f".{'.'.join(parent['class'])} a"
-                candidates[parent_selector] = candidates.get(parent_selector, 0) + 1
-
-            # 3. 복합 선택자 (부모+자식)
-            if parent and parent.parent:
-                grandparent = parent.parent
-                if grandparent.get('class'):
-                    complex_selector = f".{'.'.join(grandparent['class'])} a"
-                    candidates[complex_selector] = candidates.get(complex_selector, 0) + 1
-
-        return candidates
-
-    def _evaluate_and_select_best(self, candidates, soup):
-        """가중치 기반 최적 선택자 선택"""
-        scored_candidates = []
-
-        for selector, count in candidates.items():
-            try:
-                # BeautifulSoup CSS 선택자로 테스트
-                matches = soup.select(selector)
-
-                # 점수 계산
-                score = 0
-
-                # 1. 매칭 개수 점수 (적당한 수가 좋음)
-                if 3 <= len(matches) <= 50:
-                    score += 30
-                elif 1 <= len(matches) <= 2:
-                    score += 20
-                elif len(matches) > 50:
-                    score += 10
-
-                # 2. 선택자 구체성 점수
-                if 'job' in selector.lower():
-                    score += 25
-                if 'career' in selector.lower():
-                    score += 20
-                if 'recruit' in selector.lower():
-                    score += 20
-
-                # 3. UI 요소 제외 (감점)
-                ui_elements = ['nav', 'footer', 'header', 'menu', 'sidebar']
-                if any(ui_elem in selector.lower() for ui_elem in ui_elements):
-                    score -= 30
-
-                # 4. 선택자 길이 점수 (너무 복잡하지 않게)
-                if 10 <= len(selector) <= 50:
-                    score += 15
-
-                scored_candidates.append((selector, score, len(matches)))
-
-            except Exception:
-                continue  # 잘못된 선택자는 건너뛰기
-
-        # 점수순 정렬하여 최고 점수 반환
-        scored_candidates.sort(key=lambda x: x[1], reverse=True)
-
-        return scored_candidates[0][0] if scored_candidates else None
+    # 4. 최적 컨테이너에서 구체적인 선택자 생성
+    container = max(parent_scores.items(), key=lambda x: x[1])[0]
+    # ... 선택자 생성 로직 ...
+    return final_selector, job_titles
 ```
 
 ### 6. 채용공고 데이터 추출 및 검증
 
-**HTML에서 채용공고 추출:**
+**HTML에서 채용공고 추출 (통합 처리):**
 ```python
-# job_monitoring_logic.py:520-570
-def _extract_job_postings_from_html(self, html_content, selector):
-    """
-    선택자를 사용하여 HTML에서 채용공고 추출
-    """
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+# job_monitoring_logic.py:696-710 (_process_company_complete 내부)
+# 선택자로 채용공고 추출
+postings = soup.select(selector)
+all_texts = [post.get_text(strip=True) for post in postings if post.get_text(strip=True).strip()]
 
-        # 1. CSS 선택자로 요소 추출
-        elements = soup.select(selector)
+# analyze_titles.py의 _is_potential_job_posting 사용하여 채용공고 필터링
+job_titles = {text for text in all_texts if self.selector_analyzer._is_potential_job_posting(text)}
 
-        if not elements:
-            return []
-
-        job_postings = []
-        seen_texts = set()  # 중복 제거용
-
-        for element in elements:
-            # 2. 텍스트 추출 및 정제
-            text = element.get_text(strip=True)
-
-            # 3. 기본 필터링
-            if not text or len(text) < 2:
-                continue
-
-            # 4. 불필요한 텍스트 제거
-            filtered_text = self._clean_job_posting_text(text)
-
-            # 5. 중복 제거
-            if filtered_text and filtered_text not in seen_texts:
-                seen_texts.add(filtered_text)
-
-                # 6. 채용공고 유효성 검증
-                if self._is_valid_job_posting(filtered_text):
-                    job_postings.append(filtered_text)
-
-        return job_postings[:50]  # 최대 50개 제한
-
-    except Exception as e:
-        self.logger.error(f"채용공고 추출 오류: {e}")
-        return []
-
-def _clean_job_posting_text(self, text):
-    """채용공고 텍스트 정제"""
-    # 1. 날짜 패턴 제거
-    text = re.sub(r'\d{4}[-./]\d{1,2}[-./]\d{1,2}', '', text)
-    text = re.sub(r'\d{1,2}[-./]\d{1,2}[-./]\d{4}', '', text)
-
-    # 2. 시간 패턴 제거
-    text = re.sub(r'\d{1,2}:\d{2}', '', text)
-
-    # 3. 불필요한 기호 정제
-    text = re.sub(r'[^\w\s가-힣()]', ' ', text)
-    text = ' '.join(text.split())  # 연속 공백 제거
-
-    # 4. 길이 제한
-    return text[:200] if text else None
-
-def _is_valid_job_posting(self, text):
-    """채용공고 유효성 검증"""
-    # 1. 최소 길이 체크
-    if len(text) < 3:
+# analyze_titles.py:64-100 - 채용공고 유효성 검증
+def _is_potential_job_posting(self, text: str) -> bool:
+    """텍스트가 채용공고일 가능성을 판단"""
+    # 1. 길이 체크 (3~150자)
+    if not (3 <= len(text) <= 150):
         return False
 
-    # 2. 직무 관련 키워드 포함 여부
-    job_keywords = [
-        # 한글 직무
-        '개발', '프로그래머', '엔지니어', '디자이너', '기획',
-        '마케팅', '영업', '운영', '관리', '전문가',
-
-        # 영문 직무
-        'developer', 'engineer', 'designer', 'manager',
-        'analyst', 'specialist', 'coordinator'
+    # 2. 회사명 패턴 제외 (HD현대, 삼성, LG 등)
+    company_name_patterns = [
+        r'^(HD현대\w*|삼성\w*|LG\w*|SK\w*|포스코\w*|롯데\w*|한화\w*|...)$',
     ]
+    for pattern in company_name_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return False
 
-    text_lower = text.lower()
-    has_job_keyword = any(keyword in text_lower for keyword in job_keywords)
-
-    # 3. 제외할 텍스트 패턴
-    exclude_patterns = [
-        '로그인', '회원가입', '홈', '메뉴', '검색',
-        'login', 'signup', 'home', 'menu', 'search',
-        '이전', '다음', 'prev', 'next', '더보기', 'more'
+    # 3. 날짜/시간/태그 패턴 제외
+    datetime_and_ui_patterns = [
+        r'^\d{4}\.\d{2}\.\d{2}.*$',  # 날짜 패턴
+        r'^D-\d+.*$',                 # D-day 패턴
+        r'^#[^#]+(\s+외\s*\d+)?$',    # 태그 패턴
     ]
+    for pattern in datetime_and_ui_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return False
 
-    has_exclude = any(pattern in text_lower for pattern in exclude_patterns)
-
-    return has_job_keyword and not has_exclude
+    return True
 ```
 
 ### 7. 외국인 채용공고 키워드 매칭
 
 **키워드 하이라이트 처리:**
 ```python
-# job_monitoring_logic.py:780-830
-def _highlight_foreign_keywords(self, job_posting):
-    """
-    외국인 채용공고 키워드를 하이라이트하고 감지 여부 반환
-    """
+# job_monitoring_logic.py:585-654
+def _highlight_foreign_keywords(self, job_title: str) -> Tuple[str, bool]:
+    """채용공고 제목에서 외국인 키워드를 볼드처리하고, 외국인 공고인지 여부를 반환"""
     if not self.foreign_keywords:
-        return job_posting, False
+        return job_title, False
 
-    highlighted_text = job_posting
     is_foreign = False
 
+    # 1단계: 이미 *로 둘러싸인 부분 찾기 (보호)
+    markdown_ranges = []
+    for match in re.finditer(r'\*[^*]+\*', job_title):
+        markdown_ranges.append((match.start(), match.end()))
+
+    # 2단계: 키워드 찾기 (보호된 영역 제외)
+    matches = []
     for keyword in self.foreign_keywords:
-        keyword = keyword.strip()
-        if not keyword:
-            continue
+        for match in re.finditer(re.escape(keyword), job_title, re.IGNORECASE):
+            start, end = match.start(), match.end()
 
-        # 1. 대소문자 무관 검색
-        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+            # 이미 마크다운으로 처리된 영역과 겹치는지 확인
+            overlap = any(not (end <= md_start or start >= md_end)
+                         for md_start, md_end in markdown_ranges)
 
-        if pattern.search(job_posting):
-            is_foreign = True
+            if not overlap:
+                matches.append((start, end))
+                is_foreign = True
 
-            # 2. 기존 볼드체와 중복 방지
-            def replace_func(match):
-                matched_text = match.group(0)
-                # 이미 *로 둘러싸여 있는지 확인
-                if highlighted_text[max(0, match.start()-1):match.start()] == '*' and \
-                   highlighted_text[match.end():match.end()+1] == '*':
-                    return matched_text  # 이미 볼드체면 그대로
-                return f'*{matched_text}*'
+    if not is_foreign:
+        return job_title, False
 
-            # 3. 키워드 하이라이트 적용
-            highlighted_text = pattern.sub(replace_func, highlighted_text)
+    # 3단계: 매칭된 위치들을 병합 (중첩 제거)
+    matches.sort()
+    merged = [matches[0]]
+    for current_start, current_end in matches[1:]:
+        last_start, last_end = merged[-1]
+        if current_start <= last_end:
+            merged[-1] = (last_start, max(last_end, current_end))
+        else:
+            merged.append((current_start, current_end))
 
-    return highlighted_text, is_foreign
+    # 4단계: 볼드 처리된 새로운 문자열 생성
+    highlighted_title = ""
+    last_index = 0
+    for start, end in merged:
+        highlighted_title += job_title[last_index:start]
+        highlighted_title += f"*{job_title[start:end]}*"
+        last_index = end
+    highlighted_title += job_title[last_index:]
 
-def _is_foreign_job_posting(self, job_posting):
-    """외국인 채용공고 여부만 확인 (하이라이트 없이)"""
-    if not self.foreign_keywords:
-        return False
+    # 외국인 공고인 경우 크리스탈볼 이모지 추가
+    if is_foreign:
+        highlighted_title = f"🔮 {highlighted_title}"
 
-    job_lower = job_posting.lower()
-    return any(keyword.strip().lower() in job_lower
-              for keyword in self.foreign_keywords if keyword.strip())
+    return highlighted_title, is_foreign
 ```
 
 ### 8. 결과 비교 및 새 공고 감지
 
 **이전 결과와 비교 로직:**
 ```python
-# job_monitoring_logic.py:690-750
-def find_new_jobs(self, current_jobs, existing_jobs):
-    """
-    현재 크롤링 결과와 이전 결과를 비교하여 새 공고 감지
-    """
+# job_monitoring_logic.py:1602-1632
+def find_new_jobs(self, current_jobs: Dict, existing_jobs: Dict) -> Dict[str, List[str]]:
+    """현재 크롤링 결과와 이전 결과를 비교하여 새 공고 감지"""
     new_jobs = {}
+    for comp, curr in current_jobs.items():
+        if curr is None:
+            curr = []
+        # list나 set을 모두 set으로 변환하여 비교
+        curr_set = set(curr) if not isinstance(curr, set) else curr
+        existing_set = existing_jobs.get(comp, set())
 
-    for company, current_job_list in current_jobs.items():
-        if not current_job_list:
-            continue
-
-        # 1. 이전 결과 로드
-        existing_job_list = existing_jobs.get(company, [])
-
-        # 2. 새 공고 필터링 (집합 연산 사용)
-        current_set = set(current_job_list)
-        existing_set = set(existing_job_list)
-        new_job_set = current_set - existing_set
-
-        # 3. 새 공고가 있으면 결과에 추가
-        if new_job_set:
-            new_jobs[company] = list(new_job_set)
-            self.logger.info(f"{company}: 새 공고 {len(new_job_set)}개 발견")
-
+        # 집합 차연산으로 새 공고 찾기
+        new_jobs_for_company = list(curr_set - existing_set)
+        if new_jobs_for_company:
+            new_jobs[comp] = new_jobs_for_company
     return new_jobs
 
-def check_suspicious_results(self, current_jobs, existing_jobs, new_jobs):
+def check_suspicious_results(self, current_jobs: Dict, existing_jobs: Dict, new_jobs: Dict) -> List[str]:
     """의심스러운 변경사항 감지"""
     warnings = []
+    for company, new_list in new_jobs.items():
+        existing_count = len(existing_jobs.get(company, set()))
+        current_jobs_data = current_jobs.get(company, [])
+        current_count = len(current_jobs_data) if isinstance(current_jobs_data, (list, set)) else 0
 
-    for company, current_job_list in current_jobs.items():
-        existing_job_list = existing_jobs.get(company, [])
-
-        # 1. 기존 공고가 많았는데 갑자기 없어진 경우
-        if len(existing_job_list) >= 3 and len(current_job_list) == 0:
-            warnings.append(f"{company}: 기존 {len(existing_job_list)}개 공고가 모두 사라짐")
-
-        # 2. 공고 수가 급격히 변한 경우 (50% 이상 감소)
-        elif len(existing_job_list) > 5:
-            decrease_ratio = (len(existing_job_list) - len(current_job_list)) / len(existing_job_list)
-            if decrease_ratio > 0.5:
-                warnings.append(f"{company}: 공고 수 {decrease_ratio:.0%} 감소 ({len(existing_job_list)}→{len(current_job_list)})")
-
+        # 기존 공고가 모두 사라지고 새로운 공고만 보이는 경우
+        if existing_count > 0 and len(new_list) == current_count:
+            warnings.append(f"{company}: 기존 공고가 모두 사라지고 새로운 공고만 보입니다. 홈페이지를 직접 확인해주세요.")
     return warnings
 ```
 
 ### 9. Slack 메시지 생성 및 전송
 
-**구조화된 Block Kit 메시지 생성:**
+**텍스트 기반 Slack 메시지 전송:**
 ```python
-# job_monitoring_logic.py:894-951
-def send_slack_notification(self, new_jobs, warnings, failed_companies, chunk_info=None):
-    """
-    Slack Block Kit을 활용한 구조화된 알림 메시지 전송
-    """
-    if new_jobs:
-        total_new_jobs = sum(len(jobs) for jobs in new_jobs.values())
-        foreign_job_count = sum(1 for jobs in new_jobs.values()
-                               for job in jobs if self._is_foreign_job_posting(job))
+# job_monitoring_logic.py:1693-1800
+def send_slack_notification(self, new_jobs: Dict, warnings: List, failed_companies: List, chunk_info: str = None):
+    """Slack 알림 메시지 전송"""
+    if not self.webhook_url:
+        self.logger.error(f"❌ 웹훅 URL 없음: {self.webhook_url_env}이 .env에 설정되지 않았습니다.")
+        return
 
-        # 1. 메시지 헤더 생성
+    if not new_jobs and not warnings and not failed_companies:
+        return
+
+    kst = pytz.timezone('Asia/Seoul')
+    current_time = datetime.now(kst).strftime('%H:%M')
+    weekdays = ['월', '화', '수', '목', '금', '토', '일']
+    current_datetime = datetime.now(kst)
+    formatted_datetime = f"{current_datetime.month}월 {current_datetime.day}일 ({weekdays[current_datetime.weekday()]}) {current_datetime.strftime('%H:%M')}"
+
+    def sanitize_slack_text(text: str) -> str:
+        """슬랙 메시지용 텍스트를 안전하게 처리"""
+        text = text.replace('\\', '\\\\').replace('"', '\\"')
+        # 닫히지 않은 마크다운 수정
+        if text.count('*') % 2 == 1:
+            text += '*'
+        if len(text) > 2900:
+            text = text[:2900] + "..."
+        return text
+
+    def create_unified_message():
+        """통합 메시지 생성"""
+        content_sections = []
+
+        # 요약 헤더 생성
+        total_new_jobs = sum(len(jobs) for jobs in new_jobs.values()) if new_jobs else 0
+        foreign_job_count = sum(1 for jobs in new_jobs.values() for job in jobs if self._is_foreign_job_posting(job)) if new_jobs else 0
+
+        summary_parts = []
+        if total_new_jobs > 0:
+            foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
+            summary_parts.append(f"새로운 공고: {total_new_jobs}개{foreign_info}")
+        if warnings:
+            summary_parts.append(f"홈페이지 확인: {len(warnings)}개")
+        if failed_companies:
+            summary_parts.append(f"실패: {len(failed_companies)}개")
+
         chunk_str = f"({chunk_info}) " if chunk_info else ""
-        foreign_info = f" (외국인 채용: {foreign_job_count}개 🔮)" if foreign_job_count > 0 else ""
-        header_text = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time})"
+        summary = " | ".join(summary_parts)
+        header = f":robot_face: *채용공고 모니터링 결과* {chunk_str}({current_time})\n*{summary}*"
 
-        # 2. 메시지 분할을 위한 초기화
-        current_blocks = []
-        current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": header_text}})
-        current_blocks.append({"type": "divider"})
-        current_length = len(header_text) + 50  # 여유분 포함
+        # 회사별 채용공고 섹션 생성
+        if new_jobs:
+            for company, jobs in new_jobs.items():
+                url = self.company_urls.get(company, "")
+                linked_company = f"<{url}|{company}>" if url else f"*{company}*"
+                job_lines = [f"  • {self._highlight_foreign_keywords(job)[0]}" for job in jobs]
+                content_sections.append(f"📢 {linked_company} - {formatted_datetime} ({len(jobs)}개)\n" + "\n".join(job_lines))
 
-        # 3. 회사별 채용공고 블록 생성
-        for company, jobs in new_jobs.items():
-            # 회사 URL 링크 처리
-            company_url = self.company_urls.get(company, "")
-            linked_company = f"<{company_url}|{company}>" if company_url else f"*{company}*"
-            company_with_time = f"{linked_company} - {formatted_datetime}"
+        return header, content_sections
 
-            # 채용공고 목록 생성
-            job_lines = []
-            for job in jobs:
-                highlighted_job, is_foreign = self._highlight_foreign_keywords(job)
-                job_line = f"• {highlighted_job}"
-                if is_foreign:
-                    job_line = f"🔮 {job_line}"
-                job_lines.append(job_line)
-
-            job_text = "\n".join(job_lines)
-            company_section_text = f"📢 {company_with_time} - {len(jobs)}개\n{job_text}"
-
-            # 4. 메시지 길이 체크 및 분할 처리
-            estimated_length = current_length + len(company_section_text) + 100
-
-            if estimated_length > CHAR_LIMIT:  # 2800자 초과시
-                # 현재 블록들 먼저 전송
-                payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-                send_payload(payload)
-
-                # 새 블록 시작 (계속 표시)
-                current_blocks = []
-                continuation_header = f"🎉 *새로운 채용공고 {total_new_jobs}개 발견!*{foreign_info} {chunk_str}({current_time}) - 계속"
-                current_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": continuation_header}})
-                current_blocks.append({"type": "divider"})
-                current_length = len(continuation_header) + 50
-
-            # 회사 섹션 추가
-            company_section = {"type": "section", "text": {"type": "mrkdwn", "text": company_section_text}}
-            current_blocks.append(company_section)
-            current_length += len(company_section_text) + 100
-
-        # 5. 마지막 블록들 전송
-        if current_blocks:
-            payload = {"blocks": current_blocks, "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
-            send_payload(payload)
+    # 메시지 생성 및 전송
+    header, sections = create_unified_message()
+    full_message = header + "\n\n" + "\n\n".join(sections)
+    payload = {"text": sanitize_slack_text(full_message), "username": "채용공고 알리미", "icon_emoji": ":robot_face:"}
+    requests.post(self.webhook_url, json=payload, timeout=15)
 ```
 
 ### 10. 데이터 저장 및 동기화
 
 **결과 저장 및 Google Sheets 업데이트:**
 ```python
-# job_monitoring_logic.py:750-780
-def save_jobs(self, current_jobs):
+# job_monitoring_logic.py:1634-1672
+def save_jobs(self, current_jobs: Dict):
     """크롤링 결과를 CSV 파일로 저장"""
-    # 1. 저장할 데이터 구조 생성
-    save_data = {}
-    for company, jobs in current_jobs.items():
-        save_data[company] = jobs if jobs else []
+    kst = pytz.timezone('Asia/Seoul')
+    current_time_kst = datetime.now(kst)
 
-    # 2. JSON 형태로 CSV에 저장 (호환성)
-    results_path = os.path.join(self.base_dir, 'data', self.results_filename)
-    os.makedirs(os.path.dirname(results_path), exist_ok=True)
+    all_postings = [
+        {'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')}
+        for comp, titles in current_jobs.items()
+        for title in titles
+    ]
 
-    # 3. DataFrame으로 변환하여 저장
-    df_results = pd.DataFrame([
-        {'company': company, 'jobs': json.dumps(jobs, ensure_ascii=False)}
-        for company, jobs in save_data.items()
-    ])
-
-    df_results.to_csv(results_path, index=False, encoding='utf-8-sig')
-    self.logger.info(f"결과 저장 완료: {results_path}")
-
-# Google Sheets 동기화
-# google_sheet_utils.py:80-120
-def update_sheet_from_df(self, df, worksheet_name):
-    """DataFrame을 Google Sheets에 안전하게 업데이트"""
     try:
-        # 1. 헤더 보존을 위한 기존 시트 구조 확인
-        range_name = f'{worksheet_name}!1:1'
-        existing_headers = self.service.spreadsheets().values().get(
-            spreadsheetId=self.spreadsheet_id,
-            range=range_name
-        ).execute()
+        pd.DataFrame(all_postings).to_csv(self.results_path, index=False, encoding='utf-8-sig')
+        self.logger.info(f"결과를 '{self.results_path}'에 저장했습니다.")
+    except PermissionError as e:
+        # 대안 경로 시도
+        import tempfile
+        temp_path = os.path.join(tempfile.gettempdir(), 'job_postings_latest.csv')
+        pd.DataFrame(all_postings).to_csv(temp_path, index=False, encoding='utf-8-sig')
+        self.logger.info(f"임시 경로에 결과를 저장했습니다: '{temp_path}'")
 
-        # 2. 데이터를 2차원 배열로 변환
-        values = [df.columns.tolist()]  # 헤더
-        for _, row in df.iterrows():
-            values.append(row.tolist())
+def save_jobs_incrementally(self, current_jobs: Dict, append: bool):
+    """결과를 CSV 파일에 증분 저장"""
+    kst = pytz.timezone('Asia/Seoul')
+    current_time_kst = datetime.now(kst)
+    all_postings = [{'회사_한글_이름': comp, 'job_posting_title': title, 'crawl_datetime': current_time_kst.strftime('%Y-%m-%d %H:%M:%S')} for comp, titles in current_jobs.items() for title in titles]
 
-        # 3. 전체 시트 클리어 후 새 데이터 입력
-        clear_range = f'{worksheet_name}!A:Z'
-        self.service.spreadsheets().values().clear(
-            spreadsheetId=self.spreadsheet_id,
-            range=clear_range
-        ).execute()
+    if not all_postings:
+        return
 
-        # 4. 새 데이터 배치 업데이트
-        body = {'values': values}
-        self.service.spreadsheets().values().update(
-            spreadsheetId=self.spreadsheet_id,
-            range=f'{worksheet_name}!A1',
-            valueInputOption='RAW',
-            body=body
-        ).execute()
+    df_to_save = pd.DataFrame(all_postings)
+    mode = 'a' if append else 'w'
+    header = not append
+    df_to_save.to_csv(self.results_path, mode=mode, header=header, index=False, encoding='utf-8-sig')
 
-        self.logger.info(f"Google Sheets 업데이트 완료: {len(df)}개 행")
+# google_sheet_utils.py:60-79
+def update_sheet_from_df(self, df: pd.DataFrame, sheet_name: str = None):
+    """DataFrame의 데이터로 시트 전체를 업데이트"""
+    spreadsheet = self.gc.open_by_key(self.sheet_key)
+    worksheet = spreadsheet.worksheet(sheet_name) if sheet_name else spreadsheet.sheet1
 
-    except Exception as e:
-        self.logger.error(f"Google Sheets 업데이트 실패: {e}")
-        raise
+    # 기존 데이터 삭제 후 DataFrame으로 업데이트
+    worksheet.clear()
+    worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+    self.logger.info(f"✅ '{worksheet.title}' 시트 업데이트 성공")
 ```
 
 ## 프로젝트 구조
 
 ```
 job-monitoring/
-├── src/                              # 핵심 소스코드 (5개 파일)
-│   ├── job_monitoring_logic.py       # 메인 크롤링 로직 (979줄)
-│   ├── job_monitoring_airflow_dag.py # Airflow 스케줄링 정의
-│   ├── analyze_titles.py             # 선택자 패턴 분석기 (729줄)
-│   ├── google_sheet_utils.py         # Google Sheets 연동
-│   └── utils.py                      # 유틸리티 함수들
+├── src/                              # 핵심 소스코드 (8개 파일)
+│   ├── job_monitoring_logic.py       # 메인 크롤링 로직 (1930줄)
+│   ├── job_monitoring_airflow_dag.py # Airflow 스케줄링 정의 (74줄)
+│   ├── analyze_titles.py             # 선택자 패턴 분석기 (728줄)
+│   ├── google_sheet_utils.py         # Google Sheets 연동 (209줄)
+│   ├── utils.py                      # 유틸리티 함수들 (136줄)
+│   ├── test_cpu_fix_dag.py           # CPU 문제 해결 테스트 DAG (87줄)
+│   ├── test_job_monitoring_100_dag.py # 100개 기업 테스트 DAG (50줄)
+│   └── weekly_dashboard_dag.py       # 주간 대시보드 DAG (99줄)
 ├── data/                             # 데이터 저장소
 │   ├── job_postings_latest.csv       # 일반 모니터링 결과
 │   └── top_5000_postings_latest.csv  # 5000대 기업 결과
@@ -1046,7 +881,7 @@ job-monitoring/
 - 이모지로 시각적 구분
 
 **구조화된 Slack 메시지:**
-- Block Kit 기반 가독성 높은 메시지
+- 텍스트 기반 가독성 높은 메시지 (Block Kit 호환성 이슈로 변경)
 - 회사명 클릭 시 채용 페이지 이동
 - 한국 시간 기준 상세 시간 정보
 - 실패 원인과 해결 방법 안내
@@ -1241,7 +1076,7 @@ lsof -i :8080  # 사용 중인 프로세스 확인
 #### 크롤링 관련 문제
 - **접근 차단**: User-Agent 변경, 요청 간격 증가
 - **선택자 실패**: 사이트 구조 변경 확인, Google Sheets에서 selector 값 삭제
-- **성능 저하**: MAX_WORKERS 감소, chunk_size 조정
+- **성능 저하**: chunk_size 조정, 대기 시간 증가
 
 #### Google Sheets 연동 문제
 ```bash
